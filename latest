@@ -1,0 +1,272 @@
+{
+  "version": "v1",
+  "created_at": "2026-05-10T08:34:22.584032817Z",
+  "host_fingerprint": {
+    "hostname": "vol-VMware-Virtual-Platform",
+    "machine_id": "a5a7be8d1b4148fba18ab4bfe944eee9",
+    "uid": 0
+  },
+  "profile": "af-packet",
+  "scope": "config-only",
+  "ips_mode": "ids",
+  "iface": "ens33",
+  "config_path": "/etc/suricata/suricata.yaml",
+  "snapshot": {
+    "timestamp": "2026-05-10T08:34:22.583916627Z",
+    "hostname": "vol-VMware-Virtual-Platform",
+    "user": "root",
+    "uid": 0,
+    "iface": "ens33",
+    "config_path": "/etc/suricata/suricata.yaml",
+    "total_ram_mb": 3350,
+    "firewall_backend": "nftables",
+    "build": {
+      "version": "8.0.3",
+      "supports_dpdk": true,
+      "supports_af_xdp": true,
+      "supports_nfq": true,
+      "supports_hwloc": true,
+      "raw_excerpt": "This is Suricata version 8.0.3 RELEASE\nFeatures: NFQ PCAP_SET_BUFF AF_PACKET HAVE_PACKET_FANOUT LIBCAP_NG LIBNET1.1 HAVE_HTP_URI_NORMALIZE_HOOK PCRE_JIT HAVE_NSS HTTP2_DECOMPRESSION HAVE_LUA HAVE_JA3 HAVE_JA4 HAVE_LIBJANSSON TLS TLS_C11 MAGIC RUST POPCNT64 \nSIMD support: SSE_4_2 SSE_4_1 SSE_3 SSE_2 \nAtomic intrinsics: 1 2 4 8 16 byte(s)\n64-bits, Little-endian architecture\nGCC version 15.2.0, C version 201112\ncompiled with _FORTIFY_SOURCE=2\nL1 cache line size (CLS)=64\nthread local storage method: _Thread_local\ncompiled with LibHTP v8.0.3\n\nSuricata Configuration:\n  AF_PACKET support:                       yes\n  AF_XDP support:                          yes\n  DPDK support:                            yes\n  eBPF support:                            yes\n  XDP support:                             yes\n  PF_RING support:                         no\n  NFQueue support:                         yes\n  NFLOG support:                           yes\n  IPFW support:                            no\n  Netmap support:                          no \n  DAG enabled:                             no\n  Napatech enabled:                        no\n  WinDivert enabled:                       no",
+      "warnings": null
+    },
+    "cpu": {
+      "logical_cores": 6,
+      "numa_nodes": 1,
+      "cores_by_numa": {
+        "0": [
+          0,
+          1,
+          2,
+          3,
+          4,
+          5
+        ]
+      },
+      "warnings": null
+    },
+    "nic": {
+      "iface": "ens33",
+      "driver": "e1000",
+      "pci_address": "0000:02:01.0",
+      "rss_combined_current": 0,
+      "rss_combined_max": 0,
+      "rx_queues": 1,
+      "tx_queues": 1,
+      "symmetric_rss": false,
+      "dpdk_status_line": "",
+      "dpdk_devbind_present": false,
+      "dpdk_current_driver": "",
+      "dpdk_unused_drivers": null,
+      "dpdk_can_bind_vfio": false,
+      "dpdk_can_rollback": false,
+      "dpdk_bind_ready": false,
+      "xdp_support_detected": false,
+      "numa_node": -1,
+      "promisc": false,
+      "offload": {
+        "gro": "on",
+        "lro": "off [fixed]"
+      },
+      "warnings": [
+        "dpdk-devbind.py not found for DPDK bind preflight",
+        "XDP support was not detected from interface details"
+      ]
+    },
+    "ruleset": {
+      "suricata_update_present": true,
+      "total_rules": 65990,
+      "enabled_rules": 50091,
+      "pcre_heavy_rules": 10020,
+      "rule_sources": [
+        "10/5/2026"
+      ],
+      "rules_file_path": "/var/lib/suricata/rules/suricata.rules",
+      "rules_file_size_bytes": 43560359,
+      "rules_last_updated": "2026-05-09T10:38:05Z",
+      "warnings": null
+    },
+    "safety": {
+      "default_route_iface": "ens33",
+      "ssh_iface": "ens33",
+      "is_management_iface": true,
+      "detection_method": "default-route + ssh-connection-correlation",
+      "warnings": [
+        "ssh interface not confidently detected, fallback to default route interface"
+      ]
+    },
+    "warnings": [
+      "dpdk-devbind.py not found for DPDK bind preflight",
+      "XDP support was not detected from interface details",
+      "ssh interface not confidently detected, fallback to default route interface"
+    ]
+  },
+  "yaml_backup": {
+    "original_path": "/etc/suricata/suricata.yaml",
+    "backup_path": "/etc/suricata/.surituner-backups/suricata.yaml.1778402131.bak",
+    "sha256": "6224bc7d0bc04d97c4282f54a71e0736341341aa82c530fe22aed3da28814d72",
+    "size_bytes": 93084,
+    "saved_at": "2026-05-10T08:35:31Z"
+  },
+  "pre_state": {
+    "ethtool_k": "Features for ens33:\nrx-checksumming: off\ntx-checksumming: on\n\ttx-checksum-ipv4: off [fixed]\n\ttx-checksum-ip-generic: on\n\ttx-checksum-ipv6: off [fixed]\n\ttx-checksum-fcoe-crc: off [fixed]\n\ttx-checksum-sctp: off [fixed]\nscatter-gather: on\n\ttx-scatter-gather: on\n\ttx-scatter-gather-fraglist: off [fixed]\ntcp-segmentation-offload: on\n\ttx-tcp-segmentation: on\n\ttx-tcp-ecn-segmentation: off [fixed]\n\ttx-tcp-mangleid-segmentation: on\n\ttx-tcp6-segmentation: off [fixed]\n\ttx-tcp-accecn-segmentation: off [fixed]\ngeneric-segmentation-offload: on\ngeneric-receive-offload: on\nlarge-receive-offload: off [fixed]\nrx-vlan-offload: on\ntx-vlan-offload: on [fixed]\nntuple-filters: off [fixed]\nreceive-hashing: off [fixed]\nhighdma: off [fixed]\nrx-vlan-filter: on [fixed]\nvlan-challenged: off [fixed]\ntx-gso-robust: off [fixed]\ntx-fcoe-segmentation: off [fixed]\ntx-gre-segmentation: off [fixed]\ntx-gre-csum-segmentation: off [fixed]\ntx-ipxip4-segmentation: off [fixed]\ntx-ipxip6-segmentation: off [fixed]\ntx-udp_tnl-segmentation: off [fixed]\ntx-udp_tnl-csum-segmentation: off [fixed]\ntx-gso-partial: off [fixed]\ntx-tunnel-remcsum-segmentation: off [fixed]\ntx-sctp-segmentation: off [fixed]\ntx-esp-segmentation: off [fixed]\ntx-udp-segmentation: off [fixed]\ntx-gso-list: off [fixed]\ntx-nocache-copy: off\nloopback: off [fixed]\nrx-fcs: off\nrx-all: off\ntx-vlan-stag-hw-insert: off [fixed]\nrx-vlan-stag-hw-parse: off [fixed]\nrx-vlan-stag-filter: off [fixed]\nl2-fwd-offload: off [fixed]\nhw-tc-offload: off [fixed]\nesp-hw-offload: off [fixed]\nesp-tx-csum-hw-offload: off [fixed]\nrx-udp_tunnel-port-offload: off [fixed]\ntls-hw-tx-offload: off [fixed]\ntls-hw-rx-offload: off [fixed]\nrx-gro-hw: off [fixed]\ntls-hw-record: off [fixed]\nrx-gro-list: off\nmacsec-hw-offload: off [fixed]\nrx-udp-gro-forwarding: off\nhsr-tag-ins-offload: off [fixed]\nhsr-tag-rm-offload: off [fixed]\nhsr-fwd-offload: off [fixed]\nhsr-dup-offload: off [fixed]",
+    "ethtool_g": "Ring parameters for ens33:\nPre-set maximums:\nRX:\t\t\t4096\nRX Mini:\t\tn/a\nRX Jumbo:\t\tn/a\nTX:\t\t\t4096\nTX push buff len:\tn/a\nHDS thresh:\t\tn/a\nCurrent hardware settings:\nRX:\t\t\t256\nRX Mini:\t\tn/a\nRX Jumbo:\t\tn/a\nTX:\t\t\t256\nRX Buf Len:\t\tn/a\nCQE Size:\t\tn/a\nTX Push:\t\toff\nRX Push:\t\toff\nTX push buff len:\tn/a\nTCP data split:\t\tn/a\nHDS thresh:\t\tn/a",
+    "ethtool_l": "",
+    "sysctl": {
+      "net.core.netdev_max_backlog": "1000",
+      "net.core.rmem_max": "4194304",
+      "net.core.wmem_max": "4194304",
+      "vm.nr_hugepages": "0"
+    },
+    "irq_affinity": {
+      "19": "00000000,00000000,00000000,0000003f"
+    },
+    "irqbalance_status": "inactive",
+    "promisc": false,
+    "hugepages": {
+      "HugePages_Free": "0",
+      "HugePages_Total": "0"
+    },
+    "node_hugepages": {
+      "node0": "0"
+    },
+    "systemd_status": "inactive"
+  },
+  "plan_actions": [
+    {
+      "id": "yaml-tuning",
+      "summary": "Tune suricata.yaml profile settings",
+      "reason": "Align Suricata runmode, affinity and memory caps with hardware and ruleset size.",
+      "risk_level": "LOW",
+      "category": "config",
+      "kind": "yaml",
+      "apply_cmd": "update suricata.yaml (profile=af-packet runmode=workers)",
+      "rollback_cmd": "restore suricata.yaml from backup in state file",
+      "blocked_by_guardrail": false,
+      "requires_root": true,
+      "metadata": {
+        "ips_mode": "ids",
+        "profile": "af-packet",
+        "runmode": "workers"
+      }
+    }
+  ],
+  "applied": [
+    {
+      "index": 0,
+      "action_id": "yaml-tuning",
+      "command": [
+        "update suricata.yaml (profile=af-packet runmode=workers)"
+      ],
+      "status": "ok"
+    }
+  ],
+  "rollback": [
+    {
+      "index": 0,
+      "action_id": "rollback-yaml",
+      "command": [
+        "restore suricata.yaml from backup"
+      ],
+      "status": "ok"
+    },
+    {
+      "index": -1,
+      "action_id": "prestate-irq-affinity",
+      "command": [
+        "restore irq affinity from pre-state"
+      ],
+      "status": "ok"
+    },
+    {
+      "index": -1,
+      "action_id": "prestate-ring-buffers",
+      "command": [
+        "restore ring buffers from pre-state"
+      ],
+      "status": "ok"
+    },
+    {
+      "index": -1,
+      "action_id": "prestate-promisc",
+      "command": [
+        "ip",
+        "link",
+        "set",
+        "dev",
+        "ens33",
+        "promisc",
+        "off"
+      ],
+      "status": "ok"
+    },
+    {
+      "index": -1,
+      "action_id": "prestate-sysctl-net.core.netdev_max_backlog",
+      "command": [
+        "sysctl",
+        "-w",
+        "net.core.netdev_max_backlog=1000"
+      ],
+      "status": "ok"
+    },
+    {
+      "index": -1,
+      "action_id": "prestate-sysctl-net.core.rmem_max",
+      "command": [
+        "sysctl",
+        "-w",
+        "net.core.rmem_max=4194304"
+      ],
+      "status": "ok"
+    },
+    {
+      "index": -1,
+      "action_id": "prestate-sysctl-net.core.wmem_max",
+      "command": [
+        "sysctl",
+        "-w",
+        "net.core.wmem_max=4194304"
+      ],
+      "status": "ok"
+    },
+    {
+      "index": -1,
+      "action_id": "prestate-sysctl-vm.nr_hugepages",
+      "command": [
+        "sysctl",
+        "-w",
+        "vm.nr_hugepages=0"
+      ],
+      "status": "ok"
+    },
+    {
+      "index": -1,
+      "action_id": "prestate-node-hugepages",
+      "command": [
+        "restore per-node hugepages from pre-state"
+      ],
+      "status": "ok"
+    },
+    {
+      "index": -1,
+      "action_id": "prestate-irqbalance",
+      "command": [
+        "systemctl",
+        "stop",
+        "irqbalance"
+      ],
+      "status": "ok"
+    },
+    {
+      "index": -1,
+      "action_id": "prestate-suricata-service",
+      "command": [
+        "systemctl",
+        "stop",
+        "suricata.service"
+      ],
+      "status": "ok"
+    }
+  ],
+  "status": "rolled_back"
+}

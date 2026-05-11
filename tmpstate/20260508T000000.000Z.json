@@ -1,0 +1,16 @@
+{
+  "version":"v1",
+  "created_at":"2026-05-08T00:00:00Z",
+  "host_fingerprint":{"hostname":"h","machine_id":"m","uid":0},
+  "profile":"af-packet",
+  "scope":"config-only",
+  "ips_mode":"ids",
+  "iface":"eth0",
+  "config_path":"/etc/suricata/suricata.yaml",
+  "snapshot":{"timestamp":"2026-05-08T00:00:00Z","hostname":"h","user":"u","uid":0,"iface":"eth0","config_path":"/etc/suricata/suricata.yaml","total_ram_mb":0,"build":{},"cpu":{},"nic":{},"ruleset":{},"safety":{},"warnings":[]},
+  "pre_state":{},
+  "plan_actions":[{"id":"yaml-tuning","summary":"","reason":"","risk_level":"LOW","category":"config","kind":"yaml","apply_cmd":"","rollback_cmd":"","blocked_by_guardrail":false,"requires_root":true}],
+  "applied":[{"index":0,"action_id":"yaml-tuning","command":["x"],"status":"ok"}],
+  "rollback":[],
+  "status":"applied"
+}
