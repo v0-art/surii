@@ -2,10 +2,8 @@ package surituner
 
 import (
 	"bufio"
-	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"os/user"
 	"path/filepath"
 	"regexp"
@@ -38,15 +36,27 @@ type dpdkPreflightResult struct {
 	CanBindVFIO     bool
 	CanRollbackBind bool
 	BindReady       bool
+	IOMMUGroup      string
+	IOMMUViable     bool
 }
+
+var vfioPCIAvailabilityPaths = []string{
+	"/sys/module/vfio_pci",
+	"/sys/bus/pci/drivers/vfio-pci",
+	"/dev/vfio/vfio",
+}
+var pciDevicesSysfsDir = "/sys/bus/pci/devices"
 
 func NewCollector(runner CommandRunner) *Collector {
 	return &Collector{Runner: runner}
 }
 
 func (c *Collector) Collect(iface string, configPath string) (SystemSnapshot, error) {
-	if strings.TrimSpace(iface) == "" {
-		return SystemSnapshot{}, errors.New("iface is required")
+	if err := validateIfaceArg(iface); err != nil {
+		return SystemSnapshot{}, err
+	}
+	if err := validatePathArg("configPath", configPath, false); err != nil {
+		return SystemSnapshot{}, err
 	}
 	host, _ := os.Hostname()
 	currentUser, _ := user.Current()
@@ -263,7 +273,7 @@ func (c *Collector) collectNICInfo(iface string) NICInfo {
 
 	nic.RSSCombinedCurrent, nic.RSSCombinedMax = c.collectRSSChannels(iface, &nic.Warnings)
 	nic.RXQueues, nic.TXQueues = collectQueueCounts(iface)
-	nic.SymmetricRSS = nic.RXQueues > 1 && nic.RXQueues == nic.TXQueues
+	nic.SymmetricRSS = c.collectSymmetricRSS(iface, nic.RXQueues, nic.TXQueues, &nic.Warnings)
 	dpdkPreflight := c.collectDPDKPreflight(nic.PCIAddress, nic.Driver, &nic.Warnings)
 	nic.DPDKStatusLine = dpdkPreflight.StatusLine
 	nic.DPDKDevbindPresent = dpdkPreflight.DevbindPresent
@@ -272,6 +282,8 @@ func (c *Collector) collectNICInfo(iface string) NICInfo {
 	nic.DPDKCanBindVFIO = dpdkPreflight.CanBindVFIO
 	nic.DPDKCanRollback = dpdkPreflight.CanRollbackBind
 	nic.DPDKBindReady = dpdkPreflight.BindReady
+	nic.DPDKIOMMUGroup = dpdkPreflight.IOMMUGroup
+	nic.DPDKIOMMUViable = dpdkPreflight.IOMMUViable
 	nic.XDPSupportDetected = c.detectXDPSupport(iface, &nic.Warnings)
 
 	res, err := c.Runner.Run([]string{"ip", "-o", "link", "show", iface}, 5*time.Second, true)
@@ -282,18 +294,115 @@ func (c *Collector) collectNICInfo(iface string) NICInfo {
 	return nic
 }
 
-func (c *Collector) detectXDPSupport(iface string, warnings *[]string) bool {
-	res, err := c.Runner.Run([]string{"ip", "-details", "link", "show", iface}, 5*time.Second, true)
-	if err != nil || res.Stdout == "" {
-		*warnings = append(*warnings, "unable to probe XDP support with ip -details link show")
+func (c *Collector) collectSymmetricRSS(iface string, rxQueues int, txQueues int, warnings *[]string) bool {
+	if rxQueues <= 1 || txQueues <= 1 || rxQueues != txQueues {
 		return false
 	}
-	lower := strings.ToLower(res.Stdout)
-	if linkDetailsIndicateXDPSupport(lower) {
+	res, err := c.Runner.Run([]string{"ethtool", "-x", iface}, 8*time.Second, true)
+	if err != nil || res.ExitCode != 0 || strings.TrimSpace(res.Stdout) == "" {
+		*warnings = append(*warnings, "symmetric RSS was not proven; AF_PACKET should use cluster_flow")
+		return false
+	}
+	if rssOutputIndicatesSymmetricHash(res.Stdout) {
 		return true
 	}
-	*warnings = append(*warnings, "XDP support was not detected from interface details")
+	*warnings = append(*warnings, "RSS queues exist but symmetric hash mode was not detected; AF_PACKET should use cluster_flow")
 	return false
+}
+
+func rssOutputIndicatesSymmetricHash(raw string) bool {
+	lower := strings.ToLower(raw)
+	for _, needle := range []string{
+		"symmetric",
+		"sym-xor",
+		"symmetric-xor",
+		"symmetric-toeplitz",
+	} {
+		if strings.Contains(lower, needle) {
+			return true
+		}
+	}
+	return false
+}
+
+func (c *Collector) detectXDPSupport(iface string, warnings *[]string) bool {
+	if _, err := os.Stat(filepath.Join("/sys/class/net", iface)); err != nil {
+		*warnings = append(*warnings, fmt.Sprintf("interface %s is not present in sysfs for XDP preflight", iface))
+		return false
+	}
+	res, err := c.Runner.Run([]string{"ip", "-details", "link", "show", iface}, 5*time.Second, true)
+	if err == nil && res.Stdout != "" {
+		lower := strings.ToLower(res.Stdout)
+		if linkDetailsIndicateXDPSupport(lower) {
+			return true
+		}
+	} else {
+		*warnings = append(*warnings, "unable to probe XDP support with ip -details link show")
+	}
+
+	kernelRelease := c.collectKernelRelease()
+	if kernelSupportsAFXDP(kernelRelease) {
+		*warnings = append(*warnings, fmt.Sprintf("AF_XDP support inferred from kernel release %s; driver-specific zero-copy support was not proven", kernelRelease))
+		return true
+	}
+	if strings.TrimSpace(kernelRelease) == "" {
+		*warnings = append(*warnings, "AF_XDP kernel support could not be determined")
+	} else {
+		*warnings = append(*warnings, fmt.Sprintf("AF_XDP requires Linux kernel >= 4.18; detected %s", kernelRelease))
+	}
+	return false
+}
+
+func (c *Collector) collectKernelRelease() string {
+	res, err := c.Runner.Run([]string{"uname", "-r"}, 3*time.Second, true)
+	if err == nil && strings.TrimSpace(res.Stdout) != "" {
+		return strings.TrimSpace(res.Stdout)
+	}
+	raw, readErr := os.ReadFile("/proc/sys/kernel/osrelease")
+	if readErr != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(raw))
+}
+
+func kernelSupportsAFXDP(release string) bool {
+	major, minor, ok := parseKernelMajorMinor(release)
+	if !ok {
+		return false
+	}
+	if major > 4 {
+		return true
+	}
+	return major == 4 && minor >= 18
+}
+
+func parseKernelMajorMinor(release string) (int, int, bool) {
+	release = strings.TrimSpace(release)
+	if release == "" {
+		return 0, 0, false
+	}
+	parts := strings.SplitN(release, ".", 3)
+	if len(parts) < 2 {
+		return 0, 0, false
+	}
+	major, err1 := strconv.Atoi(kernelNumberPrefix(parts[0]))
+	minor, err2 := strconv.Atoi(kernelNumberPrefix(parts[1]))
+	if err1 != nil || err2 != nil {
+		return 0, 0, false
+	}
+	return major, minor, true
+}
+
+func kernelNumberPrefix(value string) string {
+	value = strings.TrimSpace(value)
+	var out strings.Builder
+	for _, r := range value {
+		if r < '0' || r > '9' {
+			break
+		}
+		out.WriteRune(r)
+	}
+	return out.String()
 }
 
 func linkDetailsIndicateXDPSupport(raw string) bool {
@@ -318,7 +427,7 @@ func (c *Collector) collectDPDKPreflight(pciAddress string, nicDriver string, wa
 		*warnings = append(*warnings, "dpdk preflight requires NIC PCI address")
 		return out
 	}
-	if _, err := exec.LookPath("dpdk-devbind.py"); err != nil {
+	if !executableAvailable("dpdk-devbind.py") {
 		*warnings = append(*warnings, "dpdk-devbind.py not found for DPDK bind preflight")
 		return out
 	}
@@ -341,6 +450,10 @@ func (c *Collector) collectDPDKPreflight(pciAddress string, nicDriver string, wa
 		*warnings = append(*warnings, fmt.Sprintf("dpdk-devbind status has no entry for %s", pciAddress))
 		return out
 	}
+	out.IOMMUGroup, out.IOMMUViable = detectIOMMUGroup(pciAddress)
+	if !out.IOMMUViable {
+		*warnings = append(*warnings, fmt.Sprintf("IOMMU group not found for %s; vfio-pci bind rollback safety is not proven", pciAddress))
+	}
 
 	out.CurrentDriver = strings.TrimSpace(parseDPDKStatusField(out.StatusLine, "drv"))
 	out.UnusedDrivers = parseDriverList(parseDPDKStatusField(out.StatusLine, "unused"))
@@ -351,8 +464,8 @@ func (c *Collector) collectDPDKPreflight(pciAddress string, nicDriver string, wa
 	if strings.EqualFold(out.CurrentDriver, "vfio-pci") {
 		out.CanBindVFIO = true
 	} else if containsString(out.UnusedDrivers, "vfio-pci") {
-		if _, err := os.Stat("/sys/module/vfio_pci"); err != nil {
-			*warnings = append(*warnings, "vfio_pci kernel module not loaded; DPDK bind may fail")
+		if !vfioPCIAppearsAvailable() {
+			*warnings = append(*warnings, "vfio-pci driver is listed as unused but kernel vfio-pci availability was not confirmed")
 		} else {
 			out.CanBindVFIO = true
 		}
@@ -373,8 +486,34 @@ func (c *Collector) collectDPDKPreflight(pciAddress string, nicDriver string, wa
 		*warnings = append(*warnings, fmt.Sprintf("sysfs driver (%s) differs from dpdk-devbind drv (%s)", nicDriver, out.CurrentDriver))
 	}
 
-	out.BindReady = out.DevbindPresent && out.StatusLine != "" && out.CanBindVFIO && (out.CanRollbackBind || strings.EqualFold(out.CurrentDriver, "vfio-pci"))
+	out.BindReady = out.DevbindPresent && out.StatusLine != "" && out.CanBindVFIO && out.IOMMUViable && (out.CanRollbackBind || strings.EqualFold(out.CurrentDriver, "vfio-pci"))
 	return out
+}
+
+func vfioPCIAppearsAvailable() bool {
+	for _, path := range vfioPCIAvailabilityPaths {
+		if _, err := os.Stat(path); err == nil {
+			return true
+		}
+	}
+	return false
+}
+
+func detectIOMMUGroup(pciAddress string) (string, bool) {
+	pciAddress = strings.TrimSpace(pciAddress)
+	if pciAddress == "" {
+		return "", false
+	}
+	linkPath := filepath.Join(pciDevicesSysfsDir, pciAddress, "iommu_group")
+	target, err := os.Readlink(linkPath)
+	if err != nil {
+		return "", false
+	}
+	group := filepath.Base(target)
+	if group == "." || group == "/" || strings.TrimSpace(group) == "" {
+		return "", false
+	}
+	return group, true
 }
 
 func (c *Collector) collectOffloadFlags(iface string) (map[string]string, []string) {
@@ -467,7 +606,7 @@ func (c *Collector) collectRuleset(configPath string) RulesetInventory {
 		RuleSources: []string{},
 		Warnings:    []string{},
 	}
-	if _, err := exec.LookPath("suricata-update"); err == nil {
+	if executableAvailable("suricata-update") {
 		inv.SuricataUpdatePresent = true
 		res, err := c.Runner.Run([]string{"suricata-update", "list-sources", "--enabled"}, 8*time.Second, true)
 		if err == nil && res.ExitCode == 0 {
@@ -821,10 +960,10 @@ func (c *Collector) collectSafety(iface string) SafetyContext {
 }
 
 func (c *Collector) detectFirewallBackend() (string, []string) {
-	if _, err := exec.LookPath("nft"); err == nil {
+	if executableAvailable("nft") {
 		return "nftables", nil
 	}
-	if _, err := exec.LookPath("iptables"); err == nil {
+	if executableAvailable("iptables") {
 		return "iptables", nil
 	}
 	return "unknown", []string{"neither nft nor iptables was detected in PATH"}

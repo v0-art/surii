@@ -63,6 +63,68 @@ func TestRenderReportJSON_Valid(t *testing.T) {
 	}
 }
 
+func TestRenderReportJSON_NormalizesNestedNulls(t *testing.T) {
+	report := Report{
+		GeneratedAt: time.Now().UTC(),
+		Snapshot: SystemSnapshot{
+			Iface: "eth0",
+		},
+	}
+	raw, err := RenderReportJSON(report)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var parsed map[string]interface{}
+	if err := json.Unmarshal([]byte(raw), &parsed); err != nil {
+		t.Fatalf("invalid json: %v", err)
+	}
+	snapshot := parsed["snapshot"].(map[string]interface{})
+	build := snapshot["build"].(map[string]interface{})
+	if _, ok := build["warnings"].([]interface{}); !ok {
+		t.Fatalf("expected snapshot.build.warnings to be an array, got %T", build["warnings"])
+	}
+	cpu := snapshot["cpu"].(map[string]interface{})
+	if _, ok := cpu["warnings"].([]interface{}); !ok {
+		t.Fatalf("expected snapshot.cpu.warnings to be an array, got %T", cpu["warnings"])
+	}
+	if _, ok := cpu["cores_by_numa"].(map[string]interface{}); !ok {
+		t.Fatalf("expected snapshot.cpu.cores_by_numa to be an object, got %T", cpu["cores_by_numa"])
+	}
+	nic := snapshot["nic"].(map[string]interface{})
+	if _, ok := nic["dpdk_unused_drivers"].([]interface{}); !ok {
+		t.Fatalf("expected snapshot.nic.dpdk_unused_drivers to be an array, got %T", nic["dpdk_unused_drivers"])
+	}
+	if _, ok := nic["offload"].(map[string]interface{}); !ok {
+		t.Fatalf("expected snapshot.nic.offload to be an object, got %T", nic["offload"])
+	}
+	ruleset := snapshot["ruleset"].(map[string]interface{})
+	if _, ok := ruleset["rule_sources"].([]interface{}); !ok {
+		t.Fatalf("expected snapshot.ruleset.rule_sources to be an array, got %T", ruleset["rule_sources"])
+	}
+}
+
+func TestRenderPlanJSON_NormalizesBlockingReasons(t *testing.T) {
+	raw, err := RenderPlanJSON(Plan{
+		GeneratedAt: time.Now().UTC(),
+		Profile:     ProfileAFPacket,
+		Scope:       ScopeConfigOnly,
+		IPSMode:     IPSModeIDS,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var parsed map[string]interface{}
+	if err := json.Unmarshal([]byte(raw), &parsed); err != nil {
+		t.Fatalf("invalid json: %v", err)
+	}
+	if _, ok := parsed["blocking_reasons"].([]interface{}); !ok {
+		t.Fatalf("expected blocking_reasons to be an array, got %T", parsed["blocking_reasons"])
+	}
+	if _, ok := parsed["actions"].([]interface{}); !ok {
+		t.Fatalf("expected actions to be an array, got %T", parsed["actions"])
+	}
+}
+
 func TestBuildReportSections(t *testing.T) {
 	snapshot := SystemSnapshot{
 		Firewall: "unknown",

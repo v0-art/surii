@@ -24,6 +24,8 @@ func TestBuildPlan_GuardrailsBlockCriticalOnManagementIface(t *testing.T) {
 			DPDKCanBindVFIO:    true,
 			DPDKCanRollback:    true,
 			DPDKBindReady:      true,
+			DPDKIOMMUGroup:     "42",
+			DPDKIOMMUViable:    true,
 		},
 		Safety: SafetyContext{
 			IsManagementIface: true,
@@ -48,6 +50,59 @@ func TestBuildPlan_GuardrailsBlockCriticalOnManagementIface(t *testing.T) {
 	}
 }
 
+func TestBuildPlan_GuardrailsBlockOSActionsOnManagementIface(t *testing.T) {
+	snapshot := SystemSnapshot{
+		Iface: "eth0",
+		CPU: CPUInfo{
+			LogicalCores: 8,
+		},
+		NIC: NICInfo{
+			RSSCombinedCurrent: 4,
+			RSSCombinedMax:     8,
+		},
+		Safety: SafetyContext{
+			IsManagementIface: true,
+		},
+	}
+	plan, err := NewPlanner().BuildPlan(snapshot, ProfileAFPacket, ScopeFull, IPSModeIDS, false)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !plan.Blocked {
+		t.Fatalf("expected full plan to be blocked on management iface")
+	}
+	for _, action := range plan.Actions {
+		if action.Category != "os" {
+			continue
+		}
+		if !action.BlockedByGuardrail {
+			t.Fatalf("expected os action %s to be blocked on management iface", action.ID)
+		}
+	}
+}
+
+func TestBuildPlan_GuardrailsAllowConfigOnlyOnManagementIface(t *testing.T) {
+	snapshot := SystemSnapshot{
+		Iface: "eth0",
+		Safety: SafetyContext{
+			IsManagementIface: true,
+		},
+	}
+	plan, err := NewPlanner().BuildPlan(snapshot, ProfileAFPacket, ScopeConfigOnly, IPSModeIDS, false)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if plan.Blocked {
+		t.Fatalf("did not expect config-only plan to be blocked on management iface: %v", plan.BlockingReasons)
+	}
+	if len(plan.Actions) != 1 || plan.Actions[0].Kind != "yaml" {
+		t.Fatalf("expected config-only plan to contain only yaml action, got %+v", plan.Actions)
+	}
+	if plan.Actions[0].BlockedByGuardrail {
+		t.Fatalf("did not expect yaml action to be guardrail-blocked")
+	}
+}
+
 func TestBuildPlan_ForceDisablesGuardrailBlocks(t *testing.T) {
 	snapshot := SystemSnapshot{
 		Iface: "eth0",
@@ -67,6 +122,8 @@ func TestBuildPlan_ForceDisablesGuardrailBlocks(t *testing.T) {
 			DPDKCanBindVFIO:    true,
 			DPDKCanRollback:    true,
 			DPDKBindReady:      true,
+			DPDKIOMMUGroup:     "42",
+			DPDKIOMMUViable:    true,
 		},
 		Safety: SafetyContext{
 			IsManagementIface: true,
@@ -116,6 +173,8 @@ func TestBuildPlan_CapabilityGuardBlocksWhenDPDKBindNotReady(t *testing.T) {
 			DPDKCanBindVFIO:    false,
 			DPDKCanRollback:    true,
 			DPDKBindReady:      false,
+			DPDKIOMMUGroup:     "42",
+			DPDKIOMMUViable:    true,
 		},
 		Safety: SafetyContext{
 			IsManagementIface: false,
@@ -149,6 +208,8 @@ func TestBuildPlan_DPDKSkipsBindWhenAlreadyBoundToVFIO(t *testing.T) {
 			DPDKCanBindVFIO:    true,
 			DPDKCanRollback:    false,
 			DPDKBindReady:      true,
+			DPDKIOMMUGroup:     "42",
+			DPDKIOMMUViable:    true,
 		},
 		Safety: SafetyContext{
 			IsManagementIface: false,
@@ -165,6 +226,37 @@ func TestBuildPlan_DPDKSkipsBindWhenAlreadyBoundToVFIO(t *testing.T) {
 		if action.ID == "dpdk-bind" {
 			t.Fatalf("did not expect dpdk-bind action when NIC is already bound to vfio-pci")
 		}
+	}
+}
+
+func TestBuildPlan_CapabilityGuardBlocksDPDKWithoutIOMMUGroup(t *testing.T) {
+	snapshot := SystemSnapshot{
+		Iface: "eth0",
+		Build: BuildCapabilities{
+			SupportsDPDK: true,
+		},
+		NIC: NICInfo{
+			PCIAddress:         "0000:01:00.0",
+			DPDKStatusLine:     "0000:01:00.0 drv=ixgbe unused=vfio-pci",
+			DPDKDevbindPresent: true,
+			DPDKCanBindVFIO:    true,
+			DPDKCanRollback:    true,
+			DPDKBindReady:      false,
+			DPDKIOMMUViable:    false,
+		},
+		Safety: SafetyContext{
+			IsManagementIface: false,
+		},
+	}
+	plan, err := NewPlanner().BuildPlan(snapshot, ProfileDPDK, ScopeFull, IPSModeStrict, true)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !plan.Blocked || !plan.HardBlocked {
+		t.Fatalf("expected hard block without IOMMU group")
+	}
+	if !strings.Contains(strings.Join(plan.BlockingReasons, "\n"), "IOMMU group") {
+		t.Fatalf("expected IOMMU group blocking reason, got %v", plan.BlockingReasons)
 	}
 }
 
@@ -195,9 +287,38 @@ func TestBuildPlan_NFQUsesNftWhenDetected(t *testing.T) {
 		if action.RollbackExec[0] != "nft" {
 			t.Fatalf("expected nft rollback backend, got %v", action.RollbackExec)
 		}
+		if strings.Contains(action.RollbackCmd, "<surituner-owned-handle>") || strings.Contains(strings.Join(action.RollbackExec, " "), "<surituner-owned-handle>") {
+			t.Fatalf("did not expect fake nft rollback handle placeholder: %+v", action)
+		}
+		if !strings.Contains(action.RollbackCmd, nfqNftRuleComment) {
+			t.Fatalf("expected nft rollback command to identify owned rule comment, got %q", action.RollbackCmd)
+		}
 	}
 	if !found {
 		t.Fatalf("expected nfq-queue-rules action")
+	}
+}
+
+func TestBuildPlan_NFQHardBlocksUnknownFirewallBackend(t *testing.T) {
+	snapshot := SystemSnapshot{
+		Iface:    "eth0",
+		Firewall: "unknown",
+		Build: BuildCapabilities{
+			SupportsNFQ: true,
+		},
+		Safety: SafetyContext{
+			IsManagementIface: false,
+		},
+	}
+	plan, err := NewPlanner().BuildPlan(snapshot, ProfileNFQ, ScopeFull, IPSModeStrict, false)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !plan.Blocked || !plan.HardBlocked {
+		t.Fatalf("expected NFQ full plan to hard-block without firewall backend, got blocked=%t hard=%t reasons=%v", plan.Blocked, plan.HardBlocked, plan.BlockingReasons)
+	}
+	if !strings.Contains(strings.Join(plan.BlockingReasons, "\n"), "iptables or nftables") {
+		t.Fatalf("expected firewall backend blocking reason, got %v", plan.BlockingReasons)
 	}
 }
 
@@ -302,6 +423,33 @@ func TestBuildPlan_ConfigOnlyDoesNotIncludeSystemdProfileAction(t *testing.T) {
 	}
 }
 
+func TestBuildPlan_AFXDPFullDoesNotIncludeNoopQueueAction(t *testing.T) {
+	snapshot := SystemSnapshot{
+		Iface: "ens33",
+		Build: BuildCapabilities{
+			SupportsAFXDP: true,
+		},
+		NIC: NICInfo{
+			XDPSupportDetected: true,
+		},
+		Safety: SafetyContext{
+			IsManagementIface: false,
+		},
+	}
+	plan, err := NewPlanner().BuildPlan(snapshot, ProfileAFXDP, ScopeFull, IPSModeAvailability, true)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	for _, action := range plan.Actions {
+		if action.ID == "af-xdp-queues" {
+			t.Fatalf("did not expect no-op af-xdp queue action in full plan")
+		}
+	}
+	if !containsAction(plan.Actions, "af-xdp-hugepages") {
+		t.Fatalf("expected af-xdp hugepages action")
+	}
+}
+
 func TestBuildSuricataExecStart_QuotesSystemdArguments(t *testing.T) {
 	execStart := buildSuricataExecStart(SystemSnapshot{
 		Iface:      "capture 0",
@@ -316,4 +464,13 @@ func TestBuildSuricataExecStart_QuotesSystemdArguments(t *testing.T) {
 	if strings.Contains(execStart, "\n") {
 		t.Fatalf("did not expect multiline ExecStart: %q", execStart)
 	}
+}
+
+func containsAction(actions []PlanAction, id string) bool {
+	for _, action := range actions {
+		if action.ID == id {
+			return true
+		}
+	}
+	return false
 }

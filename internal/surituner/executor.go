@@ -37,6 +37,8 @@ type Executor struct {
 }
 
 var getEUID = os.Geteuid
+var prepareYAMLBackupFunc = PrepareYAMLBackup
+var writeTunedYAMLFunc = WriteTunedYAML
 
 func NewExecutor(runner CommandRunner, stateDir string) *Executor {
 	return &Executor{
@@ -79,6 +81,14 @@ func (e *Executor) Apply(plan Plan, opts ApplyOptions) (ApplyResult, error) {
 	statePath, err := e.StateStore.Save(state)
 	if err != nil {
 		return ApplyResult{}, err
+	}
+	if err := validatePreStateForActions(plan.Actions, state.PreState, opts.Force); err != nil {
+		state.Status = "failed"
+		state.Error = err.Error()
+		if updateErr := e.updateState(statePath, state); updateErr != nil {
+			return ApplyResult{StatePath: statePath}, fmt.Errorf("pre-state validation failed: %v; state update failed: %w", err, updateErr)
+		}
+		return ApplyResult{StatePath: statePath}, fmt.Errorf("pre-state validation failed: %w", err)
 	}
 
 	confirmNeeded := hasHighOrCritical(plan.Actions)
@@ -126,6 +136,7 @@ func (e *Executor) Apply(plan Plan, opts ApplyOptions) (ApplyResult, error) {
 			SymmetricRSS:  plan.Snapshot.NIC.SymmetricRSS,
 			EnabledRules:  plan.Snapshot.Ruleset.EnabledRules,
 			TotalRAMMB:    plan.Snapshot.TotalRAMMB,
+			CoresByNUMA:   plan.Snapshot.CPU.CoresByNUMA,
 		})
 		if err != nil {
 			state.Status = "failed"
@@ -170,18 +181,35 @@ func (e *Executor) Apply(plan Plan, opts ApplyOptions) (ApplyResult, error) {
 
 		switch action.Kind {
 		case "yaml":
-			backup, err := ApplyTunedYAML(plan.Snapshot.ConfigPath, preparedOriginalYAML, preparedTunedYAML)
-			if err != nil {
-				state.Status = "failed"
-				state.Error = err.Error()
-				return e.failAndRollback(statePath, &state, appliedActions, fmt.Sprintf("yaml apply failed: %v", err))
-			}
-			state.YAMLBackup = &backup
 			record := CommandRecord{
 				Index:    idx,
 				ActionID: action.ID,
 				Command:  []string{action.ApplyCmd},
 				Status:   "ok",
+			}
+			backup, err := prepareYAMLBackupFunc(plan.Snapshot.ConfigPath, preparedOriginalYAML)
+			if err != nil {
+				state.Status = "failed"
+				state.Error = err.Error()
+				if updateErr := e.updateState(statePath, state); updateErr != nil {
+					return ApplyResult{StatePath: statePath}, fmt.Errorf("yaml backup failed: %v; state update failed: %w", err, updateErr)
+				}
+				return ApplyResult{StatePath: statePath}, fmt.Errorf("yaml backup failed: %w", err)
+			}
+			state.YAMLBackup = &backup
+			if err := e.StateStore.Update(statePath, state); err != nil {
+				state.Status = "failed"
+				state.Error = err.Error()
+				return ApplyResult{StatePath: statePath}, fmt.Errorf("state update failed after yaml backup: %w", err)
+			}
+			if err := writeTunedYAMLFunc(plan.Snapshot.ConfigPath, preparedTunedYAML); err != nil {
+				record.Status = "failed"
+				record.Error = err.Error()
+				state.Applied = append(state.Applied, record)
+				appliedActions[action.ID] = action
+				state.Status = "failed"
+				state.Error = err.Error()
+				return e.failAndRollback(statePath, &state, appliedActions, fmt.Sprintf("yaml apply failed: %v", err))
 			}
 			state.Applied = append(state.Applied, record)
 			appliedActions[action.ID] = action
@@ -234,22 +262,37 @@ func (e *Executor) Apply(plan Plan, opts ApplyOptions) (ApplyResult, error) {
 			state.Applied = append(state.Applied, record)
 			appliedActions[action.ID] = action
 		case "systemd-profile":
-			backup, err := e.applyServiceProfileDropIn(action)
 			record := CommandRecord{
 				Index:    idx,
 				ActionID: action.ID,
 				Command:  []string{action.ApplyCmd},
 				Status:   "ok",
 			}
+			backup, err := e.prepareServiceProfileDropInBackup(action)
 			if err != nil {
 				record.Status = "failed"
 				record.Error = err.Error()
 				state.Applied = append(state.Applied, record)
 				state.Status = "failed"
 				state.Error = err.Error()
-				return e.failAndRollback(statePath, &state, appliedActions, fmt.Sprintf("systemd profile failed: %v", err))
+				return e.failAndRollback(statePath, &state, appliedActions, fmt.Sprintf("systemd profile backup failed: %v", err))
 			}
 			state.ServiceDropIn = &backup
+			if err := e.StateStore.Update(statePath, state); err != nil {
+				state.Status = "failed"
+				state.Error = err.Error()
+				return ApplyResult{StatePath: statePath}, fmt.Errorf("state update failed after systemd drop-in backup: %w", err)
+			}
+			err = e.writeServiceProfileDropIn(action, backup)
+			if err != nil {
+				record.Status = "failed"
+				record.Error = err.Error()
+				state.Applied = append(state.Applied, record)
+				appliedActions[action.ID] = action
+				state.Status = "failed"
+				state.Error = err.Error()
+				return e.failAndRollback(statePath, &state, appliedActions, fmt.Sprintf("systemd profile failed: %v", err))
+			}
 			state.Applied = append(state.Applied, record)
 			appliedActions[action.ID] = action
 		case "nfq-rules":
@@ -355,10 +398,13 @@ func (e *Executor) Apply(plan Plan, opts ApplyOptions) (ApplyResult, error) {
 func (e *Executor) failAndRollback(statePath string, state *StateFile, actions map[string]PlanAction, reason string) (ApplyResult, error) {
 	rollbackRecords := e.rollbackApplied(*state, actions)
 	state.Rollback = append(state.Rollback, rollbackRecords...)
-	preStateRecords := e.restorePreStateBestEffort(*state)
-	state.Rollback = append(state.Rollback, preStateRecords...)
+	if rollbackRecordsContainSuccess(rollbackRecords, "rollback-yaml-tuning") || rollbackRecordsContainSuccess(rollbackRecords, "rollback-yaml-legacy") {
+		serviceRecords := e.restoreSuricataServiceAfterYAMLRollback(*state)
+		state.Rollback = append(state.Rollback, serviceRecords...)
+		rollbackRecords = append(rollbackRecords, serviceRecords...)
+	}
 
-	rollbackErrors := failedCommandRecords(append(append([]CommandRecord{}, rollbackRecords...), preStateRecords...))
+	rollbackErrors := failedCommandRecords(rollbackRecords)
 	state.Status = "rolled_back_after_failure"
 	state.Error = reason
 	if len(rollbackErrors) > 0 {
@@ -492,6 +538,23 @@ func (e *Executor) rollbackApplied(state StateFile, actions map[string]PlanActio
 			})
 			continue
 		}
+		if action.Kind == "ethtool-l" {
+			err := e.restoreRSSCombined(state.Iface, state.PreState.EthtoolL)
+			status := "ok"
+			msg := ""
+			if err != nil {
+				status = "failed"
+				msg = err.Error()
+			}
+			records = append(records, CommandRecord{
+				Index:    entry.Index,
+				ActionID: "rollback-" + action.ID,
+				Command:  []string{"restore RSS combined queues from state"},
+				Status:   status,
+				Error:    msg,
+			})
+			continue
+		}
 		if action.Kind == "node-hugepages" {
 			err := restoreNodeHugePages(state.PreState.NodeHugePages)
 			status := "ok"
@@ -527,6 +590,48 @@ func (e *Executor) rollbackApplied(state StateFile, actions map[string]PlanActio
 			})
 			continue
 		}
+		if action.Kind == "sysctl" {
+			cmd, buildErr := sysctlRestoreCommand(action, state.PreState.Sysctl)
+			err := buildErr
+			if err == nil {
+				err = e.runBestEffort(cmd, 10*time.Second)
+			}
+			status := "ok"
+			msg := ""
+			if err != nil {
+				status = "failed"
+				msg = err.Error()
+			}
+			records = append(records, CommandRecord{
+				Index:    entry.Index,
+				ActionID: "rollback-" + action.ID,
+				Command:  cmd,
+				Status:   status,
+				Error:    msg,
+			})
+			continue
+		}
+		if action.Kind == "hugepages" {
+			cmd, buildErr := sysctlRestoreCommand(action, state.PreState.Sysctl)
+			err := buildErr
+			if err == nil {
+				err = e.runBestEffort(cmd, 10*time.Second)
+			}
+			status := "ok"
+			msg := ""
+			if err != nil {
+				status = "failed"
+				msg = err.Error()
+			}
+			records = append(records, CommandRecord{
+				Index:    entry.Index,
+				ActionID: "rollback-" + action.ID,
+				Command:  cmd,
+				Status:   status,
+				Error:    msg,
+			})
+			continue
+		}
 		if action.Kind == "systemd-profile" {
 			err := e.restoreServiceProfileDropIn(state.ServiceDropIn)
 			status := "ok"
@@ -544,21 +649,38 @@ func (e *Executor) rollbackApplied(state StateFile, actions map[string]PlanActio
 			})
 			continue
 		}
+		if action.Kind == "dpdk-bind" {
+			err := validateDPDKBindAction(action)
+			if err == nil {
+				err = e.runBestEffort(action.RollbackExec, 20*time.Second)
+			}
+			status := "ok"
+			msg := ""
+			if err != nil {
+				status = "failed"
+				msg = err.Error()
+			}
+			records = append(records, CommandRecord{
+				Index:    entry.Index,
+				ActionID: "rollback-" + action.ID,
+				Command:  action.RollbackExec,
+				Status:   status,
+				Error:    msg,
+			})
+			continue
+		}
 		if len(action.RollbackExec) == 0 {
 			continue
 		}
-		err := e.runBestEffort(action.RollbackExec, 20*time.Second)
-		status := "ok"
-		msg := ""
-		if err != nil {
-			status = "failed"
-			msg = err.Error()
+		msg := fmt.Sprintf("unsupported rollback action kind %q; refusing to execute rollback command from state", action.Kind)
+		if action.Kind == "" {
+			msg = "unsupported rollback action with empty kind; refusing to execute rollback command from state"
 		}
 		records = append(records, CommandRecord{
 			Index:    entry.Index,
 			ActionID: "rollback-" + action.ID,
-			Command:  action.RollbackExec,
-			Status:   status,
+			Command:  append([]string(nil), action.RollbackExec...),
+			Status:   "failed",
 			Error:    msg,
 		})
 	}
@@ -567,7 +689,7 @@ func (e *Executor) rollbackApplied(state StateFile, actions map[string]PlanActio
 
 func restoreYAMLFromBackup(backup *YAMLBackup) error {
 	if backup == nil {
-		return nil
+		return errors.New("missing YAML backup metadata")
 	}
 	raw, err := os.ReadFile(backup.BackupPath)
 	if err != nil {
@@ -590,6 +712,17 @@ func restoreYAMLFromBackup(backup *YAMLBackup) error {
 var serviceProfileDropInPath = "/etc/systemd/system/suricata.service.d/surituner-profile.conf"
 
 func (e *Executor) applyServiceProfileDropIn(action PlanAction) (FileBackup, error) {
+	backup, err := e.prepareServiceProfileDropInBackup(action)
+	if err != nil {
+		return backup, err
+	}
+	if err := e.writeServiceProfileDropIn(action, backup); err != nil {
+		return backup, err
+	}
+	return backup, nil
+}
+
+func (e *Executor) prepareServiceProfileDropInBackup(action PlanAction) (FileBackup, error) {
 	execStart := metadataString(action.Metadata, "exec_start", "")
 	if strings.TrimSpace(execStart) == "" {
 		return FileBackup{}, errors.New("missing systemd ExecStart metadata")
@@ -597,25 +730,35 @@ func (e *Executor) applyServiceProfileDropIn(action PlanAction) (FileBackup, err
 	if err := validateSystemdExecStart(execStart); err != nil {
 		return FileBackup{}, err
 	}
-	backup, err := backupFileForReplace(serviceProfileDropInPath)
-	if err != nil {
-		return FileBackup{}, err
+	return backupFileForReplace(serviceProfileDropInPath)
+}
+
+func (e *Executor) writeServiceProfileDropIn(action PlanAction, backup FileBackup) error {
+	execStart := metadataString(action.Metadata, "exec_start", "")
+	if strings.TrimSpace(execStart) == "" {
+		return errors.New("missing systemd ExecStart metadata")
+	}
+	if err := validateSystemdExecStart(execStart); err != nil {
+		return err
 	}
 	content := renderServiceProfileDropIn(execStart)
 	if err := os.MkdirAll(filepath.Dir(serviceProfileDropInPath), 0755); err != nil {
-		return backup, fmt.Errorf("create systemd drop-in dir: %w", err)
+		return fmt.Errorf("create systemd drop-in dir: %w", err)
 	}
 	if err := os.WriteFile(serviceProfileDropInPath, []byte(content), 0644); err != nil {
-		return backup, fmt.Errorf("write systemd drop-in: %w", err)
+		return fmt.Errorf("write systemd drop-in: %w", err)
 	}
 	if _, err := e.Runner.Run([]string{"systemctl", "daemon-reload"}, 20*time.Second, false); err != nil {
 		_ = restoreFileBackup(&backup)
-		return backup, fmt.Errorf("systemctl daemon-reload after drop-in write failed: %w", err)
+		return fmt.Errorf("systemctl daemon-reload after drop-in write failed: %w", err)
 	}
-	return backup, nil
+	return nil
 }
 
 func (e *Executor) restoreServiceProfileDropIn(backup *FileBackup) error {
+	if backup == nil {
+		return errors.New("missing systemd drop-in backup metadata")
+	}
 	if err := restoreFileBackup(backup); err != nil {
 		return err
 	}
@@ -699,6 +842,7 @@ func restoreFileBackup(backup *FileBackup) error {
 }
 
 func (e *Executor) capturePreState(iface string) PreState {
+	var warnings []string
 	sysctlKeys := []string{
 		"net.core.rmem_max",
 		"net.core.wmem_max",
@@ -708,11 +852,17 @@ func (e *Executor) capturePreState(iface string) PreState {
 	sysctlMap := map[string]string{}
 	for _, key := range sysctlKeys {
 		res, err := e.Runner.Run([]string{"sysctl", "-n", key}, 3*time.Second, true)
-		if err == nil {
-			sysctlMap[key] = strings.TrimSpace(res.Stdout)
+		value := strings.TrimSpace(res.Stdout)
+		if err == nil && res.ExitCode == 0 && value != "" {
+			sysctlMap[key] = value
+		} else {
+			warnings = append(warnings, fmt.Sprintf("pre-state sysctl %s unavailable", key))
 		}
 	}
 	irqMap := readIRQAffinityForIface(iface)
+	if len(irqMap) == 0 {
+		warnings = append(warnings, fmt.Sprintf("pre-state IRQ affinity not found for %s", iface))
+	}
 	irqbalance := "unknown"
 	if res, err := e.Runner.Run([]string{"systemctl", "is-active", "irqbalance"}, 3*time.Second, true); err == nil {
 		irqbalance = strings.TrimSpace(res.Stdout)
@@ -726,23 +876,86 @@ func (e *Executor) capturePreState(iface string) PreState {
 		IRQAffinity:      irqMap,
 		IRQBalanceStatus: irqbalance,
 		Promisc:          false,
+		PromiscKnown:     false,
 		HugePages:        readHugePages(),
 		NodeHugePages:    readNodeHugePages(),
 		SystemdStatus:    systemdStatus,
+		Warnings:         warnings,
 	}
 	if res, err := e.Runner.Run([]string{"ethtool", "-k", iface}, 6*time.Second, true); err == nil {
 		pre.EthtoolK = res.Stdout
 	}
+	if strings.TrimSpace(pre.EthtoolK) == "" {
+		pre.Warnings = append(pre.Warnings, fmt.Sprintf("pre-state ethtool -k unavailable for %s", iface))
+	}
 	if res, err := e.Runner.Run([]string{"ethtool", "-g", iface}, 6*time.Second, true); err == nil {
 		pre.EthtoolG = res.Stdout
+	}
+	if strings.TrimSpace(pre.EthtoolG) == "" {
+		pre.Warnings = append(pre.Warnings, fmt.Sprintf("pre-state ethtool -g unavailable for %s", iface))
 	}
 	if res, err := e.Runner.Run([]string{"ethtool", "-l", iface}, 6*time.Second, true); err == nil {
 		pre.EthtoolL = res.Stdout
 	}
+	if strings.TrimSpace(pre.EthtoolL) == "" {
+		pre.Warnings = append(pre.Warnings, fmt.Sprintf("pre-state ethtool -l unavailable for %s", iface))
+	}
 	if res, err := e.Runner.Run([]string{"ip", "-o", "link", "show", iface}, 5*time.Second, true); err == nil {
 		pre.Promisc = strings.Contains(res.Stdout, "PROMISC")
+		pre.PromiscKnown = res.ExitCode == 0
+	}
+	if !pre.PromiscKnown {
+		pre.Warnings = append(pre.Warnings, fmt.Sprintf("pre-state promiscuous mode unavailable for %s", iface))
 	}
 	return pre
+}
+
+func validatePreStateForActions(actions []PlanAction, pre PreState, force bool) error {
+	var missing []string
+	for _, action := range actions {
+		if action.BlockedByGuardrail && !force {
+			continue
+		}
+		switch action.Kind {
+		case "ethtool-k":
+			feature := featureFromAction(action)
+			if strings.TrimSpace(pre.EthtoolK) == "" {
+				missing = append(missing, fmt.Sprintf("%s requires ethtool -k pre-state", action.ID))
+				continue
+			}
+			if _, ok := parseEthtoolFeatureState(pre.EthtoolK, feature); !ok {
+				missing = append(missing, fmt.Sprintf("%s requires parseable %s state from ethtool -k", action.ID, feature))
+			}
+		case "ethtool-g":
+			if _, _, ok := parseCurrentRing(pre.EthtoolG); !ok {
+				missing = append(missing, fmt.Sprintf("%s requires parseable ethtool -g pre-state", action.ID))
+			}
+		case "ethtool-l", "af-xdp":
+			if _, ok := parseCurrentCombined(pre.EthtoolL); !ok {
+				missing = append(missing, fmt.Sprintf("%s requires parseable ethtool -l pre-state", action.ID))
+			}
+		case "sysctl", "hugepages":
+			if _, err := sysctlRestoreCommand(action, pre.Sysctl); err != nil {
+				missing = append(missing, fmt.Sprintf("%s requires sysctl pre-state: %v", action.ID, err))
+			}
+		case "irq":
+			if len(pre.IRQAffinity) == 0 {
+				missing = append(missing, fmt.Sprintf("%s requires IRQ affinity pre-state", action.ID))
+			}
+		case "ip-link":
+			if !pre.PromiscKnown {
+				missing = append(missing, fmt.Sprintf("%s requires promiscuous mode pre-state", action.ID))
+			}
+		case "node-hugepages":
+			if len(pre.NodeHugePages) == 0 {
+				missing = append(missing, fmt.Sprintf("%s requires per-node hugepages pre-state", action.ID))
+			}
+		}
+	}
+	if len(missing) > 0 {
+		return errors.New(strings.Join(dedupeStrings(missing), "; "))
+	}
+	return nil
 }
 
 func readHugePages() map[string]string {
@@ -901,6 +1114,43 @@ func (e *Executor) restoreRingBuffers(iface string, ethtoolG string) error {
 	return e.runBestEffort([]string{"ethtool", "-G", iface, "rx", strconv.Itoa(rx), "tx", strconv.Itoa(tx)}, 10*time.Second)
 }
 
+func (e *Executor) restoreRSSCombined(iface string, ethtoolL string) error {
+	combined, ok := parseCurrentCombined(ethtoolL)
+	if !ok {
+		return errors.New("unable to parse RSS combined queues from pre-state")
+	}
+	return e.runBestEffort([]string{"ethtool", "-L", iface, "combined", strconv.Itoa(combined)}, 10*time.Second)
+}
+
+func parseCurrentCombined(raw string) (int, bool) {
+	lines := strings.Split(raw, "\n")
+	inCurrent := false
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		lower := strings.ToLower(trimmed)
+		if strings.Contains(lower, "current hardware settings") {
+			inCurrent = true
+			continue
+		}
+		if !inCurrent {
+			continue
+		}
+		if !strings.HasPrefix(lower, "combined:") {
+			continue
+		}
+		fields := strings.Fields(trimmed)
+		if len(fields) < 2 {
+			return 0, false
+		}
+		value, err := strconv.Atoi(fields[1])
+		if err != nil || value <= 0 {
+			return 0, false
+		}
+		return value, true
+	}
+	return 0, false
+}
+
 func parseCurrentRing(raw string) (int, int, bool) {
 	lines := strings.Split(raw, "\n")
 	inCurrent := false
@@ -948,6 +1198,48 @@ func (e *Executor) restoreEthtoolFeatureFromPreState(iface string, feature strin
 		return fmt.Errorf("unable to parse %s from pre-state ethtool -k output", feature)
 	}
 	return e.runBestEffort([]string{"ethtool", "-K", iface, feature, desired}, 10*time.Second)
+}
+
+func sysctlRestoreCommand(action PlanAction, previous map[string]string) ([]string, error) {
+	keys := sysctlKeysFromAction(action)
+	if len(keys) == 0 {
+		for key := range previous {
+			keys = append(keys, key)
+		}
+	}
+	sort.Strings(keys)
+	if len(keys) == 0 {
+		return nil, errors.New("no sysctl keys available for rollback")
+	}
+	cmd := []string{"sysctl", "-w"}
+	for _, key := range keys {
+		value, ok := previous[key]
+		if !ok || strings.TrimSpace(value) == "" {
+			return cmd, fmt.Errorf("missing pre-state sysctl value for %s", key)
+		}
+		cmd = append(cmd, fmt.Sprintf("%s=%s", key, strings.TrimSpace(value)))
+	}
+	return cmd, nil
+}
+
+func sysctlKeysFromAction(action PlanAction) []string {
+	seen := map[string]struct{}{}
+	var keys []string
+	for _, arg := range action.ApplyExec {
+		if !strings.Contains(arg, "=") {
+			continue
+		}
+		key := strings.TrimSpace(strings.SplitN(arg, "=", 2)[0])
+		if key == "" {
+			continue
+		}
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		keys = append(keys, key)
+	}
+	return keys
 }
 
 func parseEthtoolFeatureState(raw string, feature string) (string, bool) {
@@ -1056,100 +1348,6 @@ func metadataInt(meta map[string]interface{}, key string, fallback int) int {
 	}
 }
 
-func (e *Executor) restorePreStateBestEffort(state StateFile) []CommandRecord {
-	var records []CommandRecord
-	if len(state.PreState.IRQAffinity) > 0 {
-		err := e.restoreIRQAffinity(state.PreState.IRQAffinity)
-		records = append(records, CommandRecord{
-			Index:    -1,
-			ActionID: "prestate-irq-affinity",
-			Command:  []string{"restore irq affinity from pre-state"},
-			Status:   statusFromErr(err),
-			Error:    errString(err),
-		})
-	}
-	if state.PreState.EthtoolG != "" {
-		err := e.restoreRingBuffers(state.Iface, state.PreState.EthtoolG)
-		records = append(records, CommandRecord{
-			Index:    -1,
-			ActionID: "prestate-ring-buffers",
-			Command:  []string{"restore ring buffers from pre-state"},
-			Status:   statusFromErr(err),
-			Error:    errString(err),
-		})
-	}
-
-	promiscCmd := promiscRestoreCommand(state.Iface, state.PreState.Promisc)
-	promiscErr := e.runBestEffort(promiscCmd, 5*time.Second)
-	records = append(records, CommandRecord{
-		Index:    -1,
-		ActionID: "prestate-promisc",
-		Command:  promiscCmd,
-		Status:   statusFromErr(promiscErr),
-		Error:    errString(promiscErr),
-	})
-
-	var sysctlKeys []string
-	for key := range state.PreState.Sysctl {
-		sysctlKeys = append(sysctlKeys, key)
-	}
-	sort.Strings(sysctlKeys)
-	for _, key := range sysctlKeys {
-		value := state.PreState.Sysctl[key]
-		cmd := []string{"sysctl", "-w", fmt.Sprintf("%s=%s", key, value)}
-		err := e.runBestEffort(cmd, 5*time.Second)
-		records = append(records, CommandRecord{
-			Index:    -1,
-			ActionID: "prestate-sysctl-" + key,
-			Command:  cmd,
-			Status:   statusFromErr(err),
-			Error:    errString(err),
-		})
-	}
-
-	if len(state.PreState.NodeHugePages) > 0 {
-		err := restoreNodeHugePages(state.PreState.NodeHugePages)
-		records = append(records, CommandRecord{
-			Index:    -1,
-			ActionID: "prestate-node-hugepages",
-			Command:  []string{"restore per-node hugepages from pre-state"},
-			Status:   statusFromErr(err),
-			Error:    errString(err),
-		})
-	}
-
-	if state.PreState.IRQBalanceStatus == "active" || state.PreState.IRQBalanceStatus == "inactive" {
-		serviceCmd := []string{"systemctl", "start", "irqbalance"}
-		if state.PreState.IRQBalanceStatus == "inactive" {
-			serviceCmd = []string{"systemctl", "stop", "irqbalance"}
-		}
-		err := e.runBestEffort(serviceCmd, 5*time.Second)
-		records = append(records, CommandRecord{
-			Index:    -1,
-			ActionID: "prestate-irqbalance",
-			Command:  serviceCmd,
-			Status:   statusFromErr(err),
-			Error:    errString(err),
-		})
-	}
-
-	if state.PreState.SystemdStatus == "active" || state.PreState.SystemdStatus == "inactive" {
-		serviceCmd := []string{"systemctl", "start", "suricata.service"}
-		if state.PreState.SystemdStatus == "inactive" {
-			serviceCmd = []string{"systemctl", "stop", "suricata.service"}
-		}
-		err := e.runBestEffort(serviceCmd, 10*time.Second)
-		records = append(records, CommandRecord{
-			Index:    -1,
-			ActionID: "prestate-suricata-service",
-			Command:  serviceCmd,
-			Status:   statusFromErr(err),
-			Error:    errString(err),
-		})
-	}
-	return records
-}
-
 func promiscRestoreCommand(iface string, previous bool) []string {
 	promiscValue := "off"
 	if previous {
@@ -1184,6 +1382,21 @@ func (e *Executor) applyNFQRule(action PlanAction) (bool, error) {
 		}
 		if _, err := e.Runner.Run(action.ApplyExec, 10*time.Second, false); err != nil {
 			return false, err
+		}
+		handle, err = e.findNFQNftRuleHandle(action)
+		if err != nil {
+			_, rollbackErr := e.rollbackNFQRule(action)
+			if rollbackErr != nil {
+				return false, fmt.Errorf("nft rule applied but verification failed: %w; cleanup failed: %v", err, rollbackErr)
+			}
+			return false, fmt.Errorf("nft rule applied but verification failed and was cleaned up: %w", err)
+		}
+		if handle == "" {
+			_, rollbackErr := e.rollbackNFQRule(action)
+			if rollbackErr != nil {
+				return false, fmt.Errorf("nft rule applied but owned handle was not found; cleanup failed: %v", rollbackErr)
+			}
+			return false, errors.New("nft rule applied but owned handle was not found and was cleaned up")
 		}
 		return true, nil
 	default:
@@ -1284,20 +1497,6 @@ func dpdkRollbackDriver(rollbackExec []string) string {
 	return ""
 }
 
-func statusFromErr(err error) string {
-	if err != nil {
-		return "failed"
-	}
-	return "ok"
-}
-
-func errString(err error) string {
-	if err == nil {
-		return ""
-	}
-	return err.Error()
-}
-
 func (e *Executor) runBestEffort(args []string, timeout time.Duration) error {
 	res, err := e.Runner.Run(args, timeout, true)
 	return commandResultError(res, err)
@@ -1334,6 +1533,94 @@ func failedCommandRecords(records []CommandRecord) []string {
 		out = append(out, fmt.Sprintf("%s failed", record.ActionID))
 	}
 	return out
+}
+
+func rollbackRecordsContainSuccess(records []CommandRecord, actionID string) bool {
+	for _, record := range records {
+		if record.ActionID == actionID && record.Status == "ok" {
+			return true
+		}
+	}
+	return false
+}
+
+func (e *Executor) restoreSuricataServiceAfterYAMLRollback(state StateFile) []CommandRecord {
+	if state.PreState.SystemdStatus != "active" && state.PreState.SystemdStatus != "inactive" {
+		return nil
+	}
+	var records []CommandRecord
+	if strings.TrimSpace(state.ConfigPath) != "" {
+		res, err := e.Runner.Run([]string{"suricata", "-T", "-c", state.ConfigPath}, suricataValidationTimeout(state.Snapshot.Ruleset.EnabledRules), false)
+		records = append(records, CommandRecord{
+			Index:    -1,
+			ActionID: "rollback-suricata-validate",
+			Command:  []string{"suricata", "-T", "-c", state.ConfigPath},
+			Status:   statusForCommandResult(res, err),
+			Error:    errorForCommandResult(res, err),
+		})
+		if err != nil || res.ExitCode != 0 {
+			return records
+		}
+	}
+	if state.PreState.SystemdStatus == "inactive" {
+		cmd := []string{"systemctl", "stop", "suricata.service"}
+		res, err := e.Runner.Run(cmd, 20*time.Second, true)
+		records = append(records, CommandRecord{
+			Index:    -1,
+			ActionID: "rollback-suricata-stop",
+			Command:  cmd,
+			Status:   statusForCommandResult(res, err),
+			Error:    errorForCommandResult(res, err),
+		})
+		return records
+	}
+	_, _ = e.Runner.Run([]string{"systemctl", "reset-failed", "suricata.service"}, 10*time.Second, true)
+	restartCmd := []string{"systemctl", "restart", "suricata.service"}
+	res, err := e.Runner.Run(restartCmd, suricataServiceRestartTimeout(state.Snapshot.Ruleset.EnabledRules), false)
+	records = append(records, CommandRecord{
+		Index:    -1,
+		ActionID: "rollback-suricata-restart",
+		Command:  restartCmd,
+		Status:   statusForCommandResult(res, err),
+		Error:    errorForCommandResult(res, err),
+	})
+	if err != nil || res.ExitCode != 0 {
+		return records
+	}
+	activeCmd := []string{"systemctl", "is-active", "--quiet", "suricata.service"}
+	res, err = e.Runner.Run(activeCmd, 10*time.Second, false)
+	records = append(records, CommandRecord{
+		Index:    -1,
+		ActionID: "rollback-suricata-active-check",
+		Command:  activeCmd,
+		Status:   statusForCommandResult(res, err),
+		Error:    errorForCommandResult(res, err),
+	})
+	return records
+}
+
+func statusForCommandResult(res CommandResult, err error) string {
+	if err != nil || res.ExitCode != 0 {
+		return "failed"
+	}
+	return "ok"
+}
+
+func errorForCommandResult(res CommandResult, err error) string {
+	if err != nil {
+		return err.Error()
+	}
+	if res.ExitCode == 0 {
+		return ""
+	}
+	details := strings.TrimSpace(res.Stderr)
+	if details == "" {
+		details = strings.TrimSpace(res.Stdout)
+	}
+	if details == "" {
+		return fmt.Sprintf("command exited with status %d", res.ExitCode)
+	}
+	return fmt.Sprintf("command exited with status %d: %s", res.ExitCode, details)
 }
 
 func askConfirmation(input io.Reader, output io.Writer, prompt string) bool {
@@ -1379,7 +1666,7 @@ func applyRequiresSystemd(actions []PlanAction, force bool) bool {
 
 func (e *Executor) ensureSystemctlAvailable() error {
 	if _, err := e.Runner.Run([]string{"systemctl", "--version"}, 5*time.Second, false); err != nil {
-		return fmt.Errorf("systemctl unavailable or not functional: %w", err)
+		return fmt.Errorf("systemd/systemctl preflight failed before applying changes: %w", err)
 	}
 	return nil
 }

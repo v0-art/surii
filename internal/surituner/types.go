@@ -96,6 +96,8 @@ type NICInfo struct {
 	DPDKCanBindVFIO    bool              `json:"dpdk_can_bind_vfio"`
 	DPDKCanRollback    bool              `json:"dpdk_can_rollback"`
 	DPDKBindReady      bool              `json:"dpdk_bind_ready"`
+	DPDKIOMMUGroup     string            `json:"dpdk_iommu_group"`
+	DPDKIOMMUViable    bool              `json:"dpdk_iommu_viable"`
 	XDPSupportDetected bool              `json:"xdp_support_detected"`
 	NUMANode           int               `json:"numa_node"`
 	Promisc            bool              `json:"promisc"`
@@ -199,9 +201,11 @@ type PreState struct {
 	IRQAffinity      map[string]string `json:"irq_affinity"`
 	IRQBalanceStatus string            `json:"irqbalance_status"`
 	Promisc          bool              `json:"promisc"`
+	PromiscKnown     bool              `json:"promisc_known"`
 	HugePages        map[string]string `json:"hugepages"`
 	NodeHugePages    map[string]string `json:"node_hugepages"`
 	SystemdStatus    string            `json:"systemd_status"`
+	Warnings         []string          `json:"warnings"`
 }
 
 type CommandRecord struct {

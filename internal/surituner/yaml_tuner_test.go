@@ -203,6 +203,27 @@ func TestApplyTuneMap_UsesOfficialAFXDPUnalignedOption(t *testing.T) {
 	}
 }
 
+func TestApplyTuneMap_AFPACKETUsesClusterFlowWhenRSSNotProven(t *testing.T) {
+	cfg := map[string]interface{}{}
+	_ = applyTuneMap(cfg, TuneOptions{
+		Profile:       ProfileAFPacket,
+		IPSMode:       IPSModeIDS,
+		Iface:         "ens33",
+		SupportsHWLOC: true,
+		SymmetricRSS:  false,
+		EnabledRules:  100,
+		TotalRAMMB:    1024,
+	})
+
+	afPacket, ok := cfg["af-packet"].([]map[string]interface{})
+	if !ok || len(afPacket) == 0 {
+		t.Fatalf("expected af-packet array")
+	}
+	if got := afPacket[0]["cluster-type"]; got != "cluster_flow" {
+		t.Fatalf("expected cluster_flow when symmetric RSS is not proven, got %v", got)
+	}
+}
+
 func TestApplyTuneMap_ConfiguresDPDKInterfaceFromPCIAddress(t *testing.T) {
 	cfg := map[string]interface{}{}
 	_ = applyTuneMap(cfg, TuneOptions{
@@ -239,9 +260,9 @@ func TestApplyTuneMap_ConfiguresExceptionPoliciesByIPSMode(t *testing.T) {
 		wantNFQFailOpen bool
 	}{
 		{
-			name:            "strict fail close",
+			name:            "strict fail close auto",
 			mode:            IPSModeStrict,
-			wantPolicy:      "drop-flow",
+			wantPolicy:      "auto",
 			wantNFQFailOpen: false,
 		},
 		{
@@ -296,6 +317,42 @@ func TestApplyTuneMap_ConfiguresExceptionPoliciesByIPSMode(t *testing.T) {
 	}
 	if _, exists := nfq["fail-open"]; exists {
 		t.Fatalf("did not expect nfq.fail-open in IDS mode")
+	}
+}
+
+func TestApplyTuneMap_FallbackAffinityUsesNUMATopology(t *testing.T) {
+	cfg := map[string]interface{}{}
+	_ = applyTuneMap(cfg, TuneOptions{
+		Profile:       ProfileAFPacket,
+		IPSMode:       IPSModeIDS,
+		SupportsHWLOC: false,
+		NICNUMA:       1,
+		CoresByNUMA: map[string][]int{
+			"0": {0, 1, 2, 3},
+			"1": {6, 4, 5, 7},
+		},
+		EnabledRules: 100,
+		TotalRAMMB:   1024,
+	})
+
+	threading, ok := cfg["threading"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected threading map")
+	}
+	affinity, ok := threading["cpu-affinity"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected cpu-affinity map")
+	}
+	workers, ok := affinity["worker-cpu-set"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected worker-cpu-set map")
+	}
+	cpus, ok := workers["cpu"].([]string)
+	if !ok || len(cpus) != 1 {
+		t.Fatalf("expected worker cpu list, got %#v", workers["cpu"])
+	}
+	if cpus[0] != "4-7" {
+		t.Fatalf("expected NUMA-local cpu set 4-7, got %q", cpus[0])
 	}
 }
 

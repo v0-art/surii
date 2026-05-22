@@ -64,6 +64,31 @@ func (m *scriptedRunner) Run(args []string, _ time.Duration, _ bool) (CommandRes
 	return CommandResult{Args: args, ExitCode: 0}, nil
 }
 
+type sequenceRunner struct {
+	calls   [][]string
+	results map[string][]CommandResult
+	errors  map[string][]error
+}
+
+func (m *sequenceRunner) Run(args []string, _ time.Duration, _ bool) (CommandResult, error) {
+	m.calls = append(m.calls, append([]string(nil), args...))
+	key := strings.Join(args, " ")
+	if queue := m.errors[key]; len(queue) > 0 {
+		err := queue[0]
+		m.errors[key] = queue[1:]
+		if err != nil {
+			return CommandResult{Args: args, ExitCode: 1, Stderr: err.Error()}, err
+		}
+	}
+	if queue := m.results[key]; len(queue) > 0 {
+		res := queue[0]
+		m.results[key] = queue[1:]
+		res.Args = append([]string(nil), args...)
+		return res, nil
+	}
+	return CommandResult{Args: args, ExitCode: 0}, nil
+}
+
 func TestParseCurrentRing(t *testing.T) {
 	raw := `
 Ring parameters for eth0:
@@ -101,6 +126,11 @@ func TestRollbackApplied_ReverseOrder(t *testing.T) {
 	r := &mockRunner{}
 	ex := &Executor{Runner: r}
 	state := StateFile{
+		PreState: PreState{
+			Sysctl: map[string]string{
+				"net.core.rmem_max": "1",
+			},
+		},
 		Applied: []CommandRecord{
 			{Index: 0, ActionID: "a0"},
 			{Index: 2, ActionID: "a2"},
@@ -108,9 +138,9 @@ func TestRollbackApplied_ReverseOrder(t *testing.T) {
 		},
 	}
 	actions := map[string]PlanAction{
-		"a0": {ID: "a0", RollbackExec: []string{"cmd", "r0"}},
-		"a1": {ID: "a1", RollbackExec: []string{"cmd", "r1"}},
-		"a2": {ID: "a2", RollbackExec: []string{"cmd", "r2"}},
+		"a0": {ID: "a0", Kind: "sysctl", ApplyExec: []string{"sysctl", "-w", "net.core.rmem_max=10"}},
+		"a1": {ID: "a1", Kind: "sysctl", ApplyExec: []string{"sysctl", "-w", "net.core.rmem_max=20"}},
+		"a2": {ID: "a2", Kind: "sysctl", ApplyExec: []string{"sysctl", "-w", "net.core.rmem_max=30"}},
 	}
 	records := ex.rollbackApplied(state, actions)
 	if len(records) != 3 {
@@ -124,15 +154,20 @@ func TestRollbackApplied_ReverseOrder(t *testing.T) {
 }
 
 func TestRollbackApplied_NonZeroExitIsFailure(t *testing.T) {
-	r := &nonZeroRunner{failCmd: "cmd"}
+	r := &nonZeroRunner{failCmd: "sysctl"}
 	ex := &Executor{Runner: r}
 	state := StateFile{
+		PreState: PreState{
+			Sysctl: map[string]string{
+				"net.core.rmem_max": "1",
+			},
+		},
 		Applied: []CommandRecord{
 			{Index: 0, ActionID: "a0"},
 		},
 	}
 	actions := map[string]PlanAction{
-		"a0": {ID: "a0", RollbackExec: []string{"cmd", "rollback"}},
+		"a0": {ID: "a0", Kind: "sysctl", ApplyExec: []string{"sysctl", "-w", "net.core.rmem_max=10"}},
 	}
 	records := ex.rollbackApplied(state, actions)
 	if len(records) != 1 {
@@ -146,13 +181,48 @@ func TestRollbackApplied_NonZeroExitIsFailure(t *testing.T) {
 	}
 }
 
+func TestRollbackApplied_RefusesUnsupportedRollbackExecFromState(t *testing.T) {
+	r := &mockRunner{}
+	ex := &Executor{Runner: r}
+	state := StateFile{
+		Applied: []CommandRecord{
+			{Index: 0, ActionID: "evil"},
+		},
+	}
+	actions := map[string]PlanAction{
+		"evil": {
+			ID:           "evil",
+			Kind:         "",
+			RollbackExec: []string{"sh", "-c", "touch /tmp/surituner-owned"},
+		},
+	}
+	records := ex.rollbackApplied(state, actions)
+	if len(records) != 1 {
+		t.Fatalf("expected one rollback record, got %d", len(records))
+	}
+	if records[0].Status != "failed" {
+		t.Fatalf("expected unsupported rollback command to fail closed, got %+v", records[0])
+	}
+	if !strings.Contains(records[0].Error, "refusing to execute") {
+		t.Fatalf("expected refusing-to-execute error, got %q", records[0].Error)
+	}
+	if len(r.calls) != 0 {
+		t.Fatalf("did not expect unsupported rollback command to execute, calls=%v", r.calls)
+	}
+}
+
 func TestFailAndRollback_MarksPartialWhenRollbackCommandFails(t *testing.T) {
 	dir := t.TempDir()
-	r := &nonZeroRunner{failCmd: "cmd"}
+	r := &nonZeroRunner{failCmd: "sysctl"}
 	ex := NewExecutor(r, filepath.Join(dir, "state"))
 	state := StateFile{
 		Version: "v1",
 		Iface:   "eth0",
+		PreState: PreState{
+			Sysctl: map[string]string{
+				"net.core.rmem_max": "1",
+			},
+		},
 		Applied: []CommandRecord{
 			{Index: 0, ActionID: "a0", Status: "ok"},
 		},
@@ -162,7 +232,7 @@ func TestFailAndRollback_MarksPartialWhenRollbackCommandFails(t *testing.T) {
 		t.Fatalf("save state: %v", err)
 	}
 	actions := map[string]PlanAction{
-		"a0": {ID: "a0", RollbackExec: []string{"cmd", "rollback"}},
+		"a0": {ID: "a0", Kind: "sysctl", ApplyExec: []string{"sysctl", "-w", "net.core.rmem_max=10"}},
 	}
 
 	result, err := ex.failAndRollback(statePath, &state, actions, "apply failed")
@@ -313,6 +383,29 @@ func TestRestoreYAMLFromBackup_VerifiesSHA256(t *testing.T) {
 	}
 }
 
+func TestRollbackApplied_YAMLMissingBackupFails(t *testing.T) {
+	r := &mockRunner{}
+	ex := &Executor{Runner: r}
+	state := StateFile{
+		Applied: []CommandRecord{
+			{Index: 0, ActionID: "yaml-tuning", Status: "ok"},
+		},
+	}
+	actions := map[string]PlanAction{
+		"yaml-tuning": {ID: "yaml-tuning", Kind: "yaml"},
+	}
+	records := ex.rollbackApplied(state, actions)
+	if len(records) != 1 {
+		t.Fatalf("expected one rollback record, got %d", len(records))
+	}
+	if records[0].Status != "failed" {
+		t.Fatalf("expected missing YAML backup to fail, got %+v", records[0])
+	}
+	if !strings.Contains(records[0].Error, "missing YAML backup") {
+		t.Fatalf("expected missing backup error, got %q", records[0].Error)
+	}
+}
+
 func TestRollbackApplied_RestoresEthtoolKFromPreState(t *testing.T) {
 	r := &mockRunner{}
 	ex := &Executor{Runner: r}
@@ -346,6 +439,193 @@ func TestRollbackApplied_RestoresEthtoolKFromPreState(t *testing.T) {
 	want := "ethtool -K eth0 gro off"
 	if got != want {
 		t.Fatalf("unexpected rollback command: got %q want %q", got, want)
+	}
+}
+
+func TestRollbackApplied_RestoresSysctlFromPreState(t *testing.T) {
+	r := &mockRunner{}
+	ex := &Executor{Runner: r}
+	state := StateFile{
+		Iface: "eth0",
+		PreState: PreState{
+			Sysctl: map[string]string{
+				"net.core.rmem_max":           "212992",
+				"net.core.wmem_max":           "212992",
+				"net.core.netdev_max_backlog": "1000",
+			},
+		},
+		Applied: []CommandRecord{
+			{Index: 0, ActionID: "sysctl-net-buffers"},
+		},
+	}
+	actions := map[string]PlanAction{
+		"sysctl-net-buffers": {
+			ID:        "sysctl-net-buffers",
+			Kind:      "sysctl",
+			ApplyExec: []string{"sysctl", "-w", "net.core.rmem_max=134217728", "net.core.wmem_max=134217728", "net.core.netdev_max_backlog=250000"},
+		},
+	}
+	records := ex.rollbackApplied(state, actions)
+	if len(records) != 1 {
+		t.Fatalf("expected one rollback record, got %d", len(records))
+	}
+	if records[0].Status != "ok" {
+		t.Fatalf("expected rollback status ok, got %s (%s)", records[0].Status, records[0].Error)
+	}
+	got := strings.Join(r.calls[0], " ")
+	want := "sysctl -w net.core.netdev_max_backlog=1000 net.core.rmem_max=212992 net.core.wmem_max=212992"
+	if got != want {
+		t.Fatalf("unexpected sysctl rollback command: got %q want %q", got, want)
+	}
+}
+
+func TestRollbackApplied_RestoresRSSCombinedFromPreState(t *testing.T) {
+	r := &mockRunner{}
+	ex := &Executor{Runner: r}
+	state := StateFile{
+		Iface: "eth0",
+		PreState: PreState{
+			EthtoolL: `
+Channel parameters for eth0:
+Pre-set maximums:
+Combined: 8
+Current hardware settings:
+Combined: 2
+`,
+		},
+		Applied: []CommandRecord{
+			{Index: 0, ActionID: "rss-combined-queues"},
+		},
+	}
+	actions := map[string]PlanAction{
+		"rss-combined-queues": {
+			ID:           "rss-combined-queues",
+			Kind:         "ethtool-l",
+			RollbackExec: []string{"ethtool", "-L", "eth0", "combined", "4"},
+		},
+	}
+	records := ex.rollbackApplied(state, actions)
+	if len(records) != 1 {
+		t.Fatalf("expected one rollback record, got %d", len(records))
+	}
+	if records[0].Status != "ok" {
+		t.Fatalf("expected rollback status ok, got %s (%s)", records[0].Status, records[0].Error)
+	}
+	got := strings.Join(r.calls[0], " ")
+	want := "ethtool -L eth0 combined 2"
+	if got != want {
+		t.Fatalf("unexpected RSS rollback command: got %q want %q", got, want)
+	}
+}
+
+func TestRollbackApplied_RestoresHugepagesFromSysctlPreState(t *testing.T) {
+	r := &mockRunner{}
+	ex := &Executor{Runner: r}
+	state := StateFile{
+		PreState: PreState{
+			Sysctl: map[string]string{
+				"vm.nr_hugepages": "8",
+			},
+		},
+		Applied: []CommandRecord{
+			{Index: 0, ActionID: "af-xdp-hugepages"},
+		},
+	}
+	actions := map[string]PlanAction{
+		"af-xdp-hugepages": {
+			ID:        "af-xdp-hugepages",
+			Kind:      "hugepages",
+			ApplyExec: []string{"sysctl", "-w", "vm.nr_hugepages=512"},
+		},
+	}
+	records := ex.rollbackApplied(state, actions)
+	if len(records) != 1 {
+		t.Fatalf("expected one rollback record, got %d", len(records))
+	}
+	if records[0].Status != "ok" {
+		t.Fatalf("expected rollback status ok, got %s (%s)", records[0].Status, records[0].Error)
+	}
+	got := strings.Join(r.calls[0], " ")
+	want := "sysctl -w vm.nr_hugepages=8"
+	if got != want {
+		t.Fatalf("unexpected hugepages rollback command: got %q want %q", got, want)
+	}
+}
+
+func TestApply_PersistsYAMLBackupBeforeLiveWrite(t *testing.T) {
+	origEUID := getEUID
+	origWriteTunedYAML := writeTunedYAMLFunc
+	defer func() {
+		getEUID = origEUID
+		writeTunedYAMLFunc = origWriteTunedYAML
+	}()
+	getEUID = func() int { return 0 }
+
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "suricata.yaml")
+	if err := os.WriteFile(configPath, []byte("runmode: autofp\n"), 0644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	r := &mockRunner{}
+	ex := NewExecutor(r, filepath.Join(dir, "state"))
+	backupWasPersisted := false
+	writeTunedYAMLFunc = func(path string, tuned []byte) error {
+		latest, err := ex.StateStore.Latest()
+		if err != nil {
+			t.Fatalf("expected state before YAML write: %v", err)
+		}
+		state, err := ex.StateStore.Load(latest)
+		if err != nil {
+			t.Fatalf("load state before YAML write: %v", err)
+		}
+		if state.YAMLBackup == nil || state.YAMLBackup.BackupPath == "" {
+			t.Fatalf("expected YAML backup metadata persisted before live write")
+		}
+		if _, err := os.Stat(state.YAMLBackup.BackupPath); err != nil {
+			t.Fatalf("expected YAML backup file before live write: %v", err)
+		}
+		backupWasPersisted = true
+		return errors.New("simulated live yaml write failure")
+	}
+
+	plan := Plan{
+		Profile: ProfileAFPacket,
+		Scope:   ScopeConfigOnly,
+		IPSMode: IPSModeIDS,
+		Snapshot: SystemSnapshot{
+			Iface:      "eth0",
+			ConfigPath: configPath,
+			Build: BuildCapabilities{
+				SupportsHWLOC: true,
+			},
+			NIC: NICInfo{
+				NUMANode:     0,
+				SymmetricRSS: true,
+			},
+		},
+		Actions: []PlanAction{
+			{ID: "yaml-tuning", Kind: "yaml", ApplyCmd: "update yaml", RiskLevel: RiskLow},
+		},
+	}
+
+	_, err := ex.Apply(plan, ApplyOptions{
+		AssumeYes: true,
+		Input:     strings.NewReader(""),
+		Output:    io.Discard,
+	})
+	if err == nil {
+		t.Fatalf("expected simulated YAML write failure")
+	}
+	if !backupWasPersisted {
+		t.Fatalf("expected write hook to verify persisted backup")
+	}
+	raw, readErr := os.ReadFile(configPath)
+	if readErr != nil {
+		t.Fatalf("read config: %v", readErr)
+	}
+	if string(raw) != "runmode: autofp\n" {
+		t.Fatalf("expected live config unchanged after write failure, got %q", string(raw))
 	}
 }
 
@@ -463,7 +743,11 @@ func TestApply_OSTuningDoesNotCallSuricataValidationOrRestart(t *testing.T) {
 	getEUID = func() int { return 0 }
 
 	dir := t.TempDir()
-	r := &mockRunner{}
+	r := &scriptedRunner{
+		results: map[string]CommandResult{
+			"sysctl -n net.core.rmem_max": {Stdout: "1"},
+		},
+	}
 	ex := NewExecutor(r, filepath.Join(dir, "state"))
 	plan := Plan{
 		Profile: ProfileAFPacket,
@@ -494,6 +778,47 @@ func TestApply_OSTuningDoesNotCallSuricataValidationOrRestart(t *testing.T) {
 	}
 	if strings.Contains(joined, "systemctl restart suricata.service") {
 		t.Fatalf("did not expect suricata restart in os-tuning scope")
+	}
+}
+
+func TestApply_PreStateValidationBlocksOSTuningBeforeLiveCommand(t *testing.T) {
+	orig := getEUID
+	defer func() { getEUID = orig }()
+	getEUID = func() int { return 0 }
+
+	dir := t.TempDir()
+	r := &scriptedRunner{}
+	ex := NewExecutor(r, filepath.Join(dir, "state"))
+	plan := Plan{
+		Profile: ProfileAFPacket,
+		Scope:   ScopeOSTuning,
+		IPSMode: IPSModeIDS,
+		Snapshot: SystemSnapshot{
+			Iface: "eth0",
+		},
+		Actions: []PlanAction{
+			{
+				ID:        "disable-gro",
+				Kind:      "ethtool-k",
+				ApplyExec: []string{"ethtool", "-K", "eth0", "gro", "off"},
+				RiskLevel: RiskMedium,
+				Metadata:  map[string]interface{}{"feature": "gro"},
+			},
+		},
+	}
+	_, err := ex.Apply(plan, ApplyOptions{
+		AssumeYes: true,
+		Input:     strings.NewReader(""),
+		Output:    io.Discard,
+	})
+	if err == nil {
+		t.Fatalf("expected pre-state validation error")
+	}
+	if !strings.Contains(err.Error(), "pre-state") {
+		t.Fatalf("expected pre-state error, got %v", err)
+	}
+	if strings.Contains(flattenCalls(r.calls), "ethtool -K eth0 gro off") {
+		t.Fatalf("did not expect live ethtool command after pre-state validation failure, calls:\n%s", flattenCalls(r.calls))
 	}
 }
 
@@ -637,6 +962,66 @@ table inet filter {
 	handle, ok := parseNFQNftRuleHandle(raw, nfqNftRuleComment)
 	if !ok || handle != "12" {
 		t.Fatalf("expected nft handle 12, got handle=%q ok=%t", handle, ok)
+	}
+}
+
+func TestApplyNFQRule_NftVerifiesOwnedHandleAfterInsert(t *testing.T) {
+	r := &sequenceRunner{
+		results: map[string][]CommandResult{
+			"nft -a list chain inet filter forward": {
+				{ExitCode: 0, Stdout: "table inet filter { chain forward { } }"},
+				{ExitCode: 0, Stdout: `queue num 0 comment "surituner-nfq-0" # handle 12`},
+			},
+		},
+	}
+	ex := &Executor{Runner: r}
+	applied, err := ex.applyNFQRule(PlanAction{
+		ID:        "nfq-queue-rules",
+		Kind:      "nfq-rules",
+		ApplyExec: []string{"nft", "add", "rule", "inet", "filter", "forward", "queue", "num", "0", "comment", nfqNftRuleComment},
+		Metadata:  map[string]interface{}{"firewall_backend": "nftables", "nft_comment": nfqNftRuleComment},
+	})
+	if err != nil {
+		t.Fatalf("applyNFQRule failed: %v", err)
+	}
+	if !applied {
+		t.Fatalf("expected nft rule to be applied")
+	}
+	joined := flattenCalls(r.calls)
+	if !strings.Contains(joined, "nft add rule inet filter forward queue num 0 comment surituner-nfq-0") {
+		t.Fatalf("expected nft add rule call, got:\n%s", joined)
+	}
+	if count := strings.Count(joined, "nft -a list chain inet filter forward"); count != 2 {
+		t.Fatalf("expected pre/post nft list verification, got %d calls:\n%s", count, joined)
+	}
+}
+
+func TestApplyNFQRule_NftCleansUpWhenPostInsertVerificationFails(t *testing.T) {
+	r := &sequenceRunner{
+		results: map[string][]CommandResult{
+			"nft -a list chain inet filter forward": {
+				{ExitCode: 0, Stdout: "table inet filter { chain forward { } }"},
+				{ExitCode: 0, Stdout: "table inet filter { chain forward { } }"},
+				{ExitCode: 0, Stdout: `queue num 0 comment "surituner-nfq-0" # handle 12`},
+			},
+		},
+	}
+	ex := &Executor{Runner: r}
+	applied, err := ex.applyNFQRule(PlanAction{
+		ID:        "nfq-queue-rules",
+		Kind:      "nfq-rules",
+		ApplyExec: []string{"nft", "add", "rule", "inet", "filter", "forward", "queue", "num", "0", "comment", nfqNftRuleComment},
+		Metadata:  map[string]interface{}{"firewall_backend": "nftables", "nft_comment": nfqNftRuleComment},
+	})
+	if err == nil {
+		t.Fatalf("expected verification failure")
+	}
+	if applied {
+		t.Fatalf("did not expect applied=true after cleanup")
+	}
+	joined := flattenCalls(r.calls)
+	if !strings.Contains(joined, "nft delete rule inet filter forward handle 12") {
+		t.Fatalf("expected cleanup delete by resolved handle, got:\n%s", joined)
 	}
 }
 
@@ -883,6 +1268,9 @@ func TestApply_ConfigOnlyFailsBeforeYAMLWriteWhenSystemctlUnavailable(t *testing
 	})
 	if err == nil {
 		t.Fatalf("expected systemctl preflight error")
+	}
+	if !strings.Contains(err.Error(), "before applying changes") {
+		t.Fatalf("expected pre-change systemctl failure context, got %v", err)
 	}
 	raw, readErr := os.ReadFile(configPath)
 	if readErr != nil {

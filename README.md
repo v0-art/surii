@@ -48,11 +48,18 @@ surituner report --iface eth0 --json
 - `report` reads the latest Suricata `stats.log` block and selected `ethtool -S` counters when available.
 - State and backup files are created with restricted permissions (`0700` directories, `0600` files).
 - Management interface guardrails block high-risk operations unless `--force` is explicitly set.
+- On a detected management interface, OS/NIC/firewall/capture-driver actions are blocked unless `--force`; `config-only` YAML changes remain allowed.
 - Capability blockers (missing DPDK/AF_XDP/NFQ support in `suricata --build-info`) are hard blocks and are not bypassed by `--force`.
 - NFQ routing supports both `nft` and `iptables` backends (auto-detected).
+- NFQ `nft` apply verifies that the managed rule can be found by comment after insertion; if verification fails it attempts cleanup before returning an error.
+- OS/NIC tuning is refused before live changes if required rollback pre-state cannot be captured.
 - Rollback restores NIC offload flags (`GRO/LRO`) from captured pre-state instead of fixed defaults.
-- DPDK apply is hard-blocked unless `dpdk-devbind.py --status` preflight confirms bind/rollback readiness (PCI entry, `vfio-pci` availability, rollback driver).
+- Root command execution and root-time utility discovery use trusted system directories instead of caller-controlled relative paths.
+- Rollback validates restored YAML and restores the previous Suricata service state when it was known before apply.
+- IPS strict mode uses Suricata's `exception-policy: auto` fail-close master switch (`drop-flow` with `drop-packet` fallback in IPS) plus NFQ `fail-open=false`; availability mode uses fail-open/pass semantics.
+- DPDK apply is hard-blocked unless `dpdk-devbind.py --status` preflight confirms bind/rollback readiness (PCI entry, `vfio-pci` availability, rollback driver, and detectable IOMMU group).
 - Rollback restores per-NUMA hugepages (`/sys/devices/system/node/node*/.../nr_hugepages`) from pre-state snapshots.
+- AF_XDP preflight checks Suricata build support, interface presence, `ip -details` XDP signals, and kernel release support (`>= 4.18`). Kernel-only inference is reported as a warning because driver-specific zero-copy support is not proven.
 
 ## Testing Without Suricata Installed
 

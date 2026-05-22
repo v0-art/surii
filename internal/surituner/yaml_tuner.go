@@ -6,6 +6,7 @@ import (
 	"os"
 	osuser "os/user"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -26,6 +27,7 @@ type TuneOptions struct {
 	SymmetricRSS  bool
 	EnabledRules  int
 	TotalRAMMB    int
+	CoresByNUMA   map[string][]int
 }
 
 // BuildTunedYAML reads the source config and returns original+tuned bytes without
@@ -49,24 +51,13 @@ func BuildTunedYAML(path string, opts TuneOptions) ([]byte, []byte, []string, er
 	return raw, updated, changes, nil
 }
 
-// ApplyTunedYAML creates backup and atomically writes the tuned configuration.
-func ApplyTunedYAML(path string, original []byte, tuned []byte) (YAMLBackup, error) {
+// PrepareYAMLBackup creates the rollback artifact before the live config is
+// changed. The caller must persist the returned metadata into state before
+// calling WriteTunedYAML.
+func PrepareYAMLBackup(path string, original []byte) (YAMLBackup, error) {
 	backupPath, backupSHA, err := backupConfig(path, original)
 	if err != nil {
 		return YAMLBackup{}, err
-	}
-	stat, statErr := os.Stat(path)
-	mode := os.FileMode(0640)
-	if statErr == nil {
-		mode = stat.Mode().Perm()
-	}
-	tmpPath := fmt.Sprintf("%s.surituner.tmp.%d", path, time.Now().UnixNano())
-	if err := os.WriteFile(tmpPath, tuned, mode); err != nil {
-		return YAMLBackup{}, fmt.Errorf("write temp tuned yaml: %w", err)
-	}
-	if err := os.Rename(tmpPath, path); err != nil {
-		_ = os.Remove(tmpPath)
-		return YAMLBackup{}, fmt.Errorf("replace tuned yaml: %w", err)
 	}
 	return YAMLBackup{
 		OriginalPath: path,
@@ -75,6 +66,37 @@ func ApplyTunedYAML(path string, original []byte, tuned []byte) (YAMLBackup, err
 		SizeBytes:    int64(len(original)),
 		SavedAt:      time.Now().UTC().Format(time.RFC3339),
 	}, nil
+}
+
+// WriteTunedYAML atomically writes the tuned configuration after validation and
+// after backup metadata has been persisted.
+func WriteTunedYAML(path string, tuned []byte) error {
+	stat, statErr := os.Stat(path)
+	mode := os.FileMode(0640)
+	if statErr == nil {
+		mode = stat.Mode().Perm()
+	}
+	tmpPath := fmt.Sprintf("%s.surituner.tmp.%d", path, time.Now().UnixNano())
+	if err := os.WriteFile(tmpPath, tuned, mode); err != nil {
+		return fmt.Errorf("write temp tuned yaml: %w", err)
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("replace tuned yaml: %w", err)
+	}
+	return nil
+}
+
+// ApplyTunedYAML creates backup and atomically writes the tuned configuration.
+func ApplyTunedYAML(path string, original []byte, tuned []byte) (YAMLBackup, error) {
+	backup, err := PrepareYAMLBackup(path, original)
+	if err != nil {
+		return YAMLBackup{}, err
+	}
+	if err := WriteTunedYAML(path, tuned); err != nil {
+		return YAMLBackup{}, err
+	}
+	return backup, nil
 }
 
 func TuneSuricataYAML(path string, opts TuneOptions) (YAMLBackup, []string, error) {
@@ -172,7 +194,7 @@ func applyTuneMap(cfg map[string]interface{}, opts TuneOptions) []string {
 		threading["autopin"] = true
 		changes = append(changes, "enabled threading.autopin=true (hwloc detected)")
 	} else {
-		cpuAffinity := buildCPUAffinityFallback(opts.NICNUMA)
+		cpuAffinity := buildCPUAffinityFallback(opts.NICNUMA, opts.CoresByNUMA)
 		setNested(cfg, []string{"threading", "cpu-affinity"}, cpuAffinity)
 		changes = append(changes, "set threading.cpu-affinity fallback map")
 	}
@@ -271,20 +293,66 @@ func applyTuneMap(cfg map[string]interface{}, opts TuneOptions) []string {
 	return changes
 }
 
-func buildCPUAffinityFallback(nicNUMA int) map[string]interface{} {
+func buildCPUAffinityFallback(nicNUMA int, coresByNUMA map[string][]int) map[string]interface{} {
 	node := 0
 	if nicNUMA >= 0 {
 		node = nicNUMA
 	}
-	cpus := "0-3"
-	if node > 0 {
-		start := node * 4
-		cpus = fmt.Sprintf("%d-%d", start, start+3)
+	cpus := cpuSetForNUMANode(node, coresByNUMA)
+	if cpus == "" {
+		cpus = "0-3"
 	}
 	return map[string]interface{}{
 		"management-cpu-set": map[string]interface{}{"cpu": []string{cpus}},
 		"worker-cpu-set":     map[string]interface{}{"cpu": []string{cpus}},
 	}
+}
+
+func cpuSetForNUMANode(node int, coresByNUMA map[string][]int) string {
+	if len(coresByNUMA) == 0 {
+		return ""
+	}
+	cpus := append([]int(nil), coresByNUMA[strconv.Itoa(node)]...)
+	if len(cpus) == 0 && node != 0 {
+		cpus = append([]int(nil), coresByNUMA["0"]...)
+	}
+	if len(cpus) == 0 {
+		return ""
+	}
+	sort.Ints(cpus)
+	uniq := cpus[:0]
+	last := -1
+	for _, cpu := range cpus {
+		if cpu < 0 || cpu == last {
+			continue
+		}
+		uniq = append(uniq, cpu)
+		last = cpu
+	}
+	if len(uniq) == 0 {
+		return ""
+	}
+	var ranges []string
+	start := uniq[0]
+	prev := uniq[0]
+	for _, cpu := range uniq[1:] {
+		if cpu == prev+1 {
+			prev = cpu
+			continue
+		}
+		ranges = append(ranges, formatCPURange(start, prev))
+		start = cpu
+		prev = cpu
+	}
+	ranges = append(ranges, formatCPURange(start, prev))
+	return strings.Join(ranges, ",")
+}
+
+func formatCPURange(start int, end int) string {
+	if start == end {
+		return strconv.Itoa(start)
+	}
+	return fmt.Sprintf("%d-%d", start, end)
 }
 
 func calcMaxPending(enabledRules int) int {
@@ -376,7 +444,7 @@ func calcMemCaps(totalRAMMB int, enabledRules int) map[string]string {
 func mapIPSModeToExceptionPolicy(mode IPSMode) string {
 	switch mode {
 	case IPSModeStrict:
-		return "drop-flow"
+		return "auto"
 	case IPSModeAvailability:
 		return "pass-flow"
 	case IPSModeIDS:

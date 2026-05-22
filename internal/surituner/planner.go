@@ -313,31 +313,6 @@ func (p *Planner) buildProfileAdvancedActions(snapshot SystemSnapshot, profile C
 				ApplyExec:    []string{"sysctl", "-w", "vm.nr_hugepages=512"},
 				RequiresRoot: true,
 			},
-			{
-				ID:          "af-xdp-queues",
-				Summary:     "Enable aggressive queue tuning for AF_XDP",
-				Reason:      "AF_XDP throughput relies on queue-level tuning.",
-				RiskLevel:   RiskCritical,
-				Category:    "os",
-				Kind:        "af-xdp",
-				ApplyCmd:    fmt.Sprintf("ethtool -L %s combined %d", iface, maxInt(snapshot.NIC.RSSCombinedCurrent, 1)),
-				RollbackCmd: "restore channel settings from state",
-				ApplyExec: []string{
-					"ethtool",
-					"-L",
-					iface,
-					"combined",
-					fmt.Sprintf("%d", maxInt(snapshot.NIC.RSSCombinedCurrent, 1)),
-				},
-				RollbackExec: []string{
-					"ethtool",
-					"-L",
-					iface,
-					"combined",
-					fmt.Sprintf("%d", maxInt(snapshot.NIC.RSSCombinedCurrent, 1)),
-				},
-				RequiresRoot: true,
-			},
 		}
 	case ProfileNFQ:
 		applyCmd := "iptables -I FORWARD -j NFQUEUE --queue-num 0"
@@ -347,9 +322,9 @@ func (p *Planner) buildProfileAdvancedActions(snapshot SystemSnapshot, profile C
 		firewallBackend := snapshot.Firewall
 		if firewallBackend == "nftables" {
 			applyCmd = fmt.Sprintf("nft add rule inet filter forward queue num 0 comment %q", nfqNftRuleComment)
-			rollbackCmd = "nft delete rule inet filter forward handle <surituner-owned-handle>"
+			rollbackCmd = fmt.Sprintf("handle=$(nft -a list chain inet filter forward | awk '/queue num 0/ && /%s/ {print $NF; exit}'); test -n \"$handle\" && nft delete rule inet filter forward handle \"$handle\"", nfqNftRuleComment)
 			applyExec = []string{"nft", "add", "rule", "inet", "filter", "forward", "queue", "num", "0", "comment", nfqNftRuleComment}
-			rollbackExec = []string{"nft", "delete", "rule", "inet", "filter", "forward", "handle", "<surituner-owned-handle>"}
+			rollbackExec = []string{"nft", "-a", "list", "chain", "inet", "filter", "forward"}
 		}
 		return []PlanAction{
 			{
@@ -381,7 +356,7 @@ func applyGuardrails(plan Plan, force bool) Plan {
 	}
 	for idx := range plan.Actions {
 		action := &plan.Actions[idx]
-		if action.RiskLevel == RiskCritical || strings.EqualFold(action.Kind, "irq") || strings.EqualFold(action.Kind, "ethtool-l") {
+		if isManagementGuardedAction(*action) {
 			action.BlockedByGuardrail = !force
 		}
 	}
@@ -399,6 +374,21 @@ func applyGuardrails(plan Plan, force bool) Plan {
 		plan.BlockingReasons = dedupeStrings(reasons)
 	}
 	return plan
+}
+
+func isManagementGuardedAction(action PlanAction) bool {
+	if action.RiskLevel == RiskCritical {
+		return true
+	}
+	if strings.EqualFold(action.Category, "os") {
+		return true
+	}
+	switch strings.ToLower(strings.TrimSpace(action.Kind)) {
+	case "irq", "ethtool-k", "ethtool-g", "ethtool-l", "sysctl", "ip-link", "dpdk-bind", "node-hugepages", "hugepages", "af-xdp", "nfq-rules":
+		return true
+	default:
+		return false
+	}
 }
 
 func applyCapabilityGuards(plan Plan) Plan {
@@ -439,6 +429,11 @@ func applyCapabilityGuards(plan Plan) Plan {
 			plan.HardBlocked = true
 			plan.BlockingReasons = append(plan.BlockingReasons, "dpdk bind/unbind readiness preflight failed")
 		}
+		if !plan.Snapshot.NIC.DPDKIOMMUViable {
+			plan.Blocked = true
+			plan.HardBlocked = true
+			plan.BlockingReasons = append(plan.BlockingReasons, "dpdk vfio-pci preflight requires a detectable IOMMU group for the NIC")
+		}
 	case ProfileAFXDP:
 		if !plan.Snapshot.Build.SupportsAFXDP {
 			plan.Blocked = true
@@ -456,9 +451,23 @@ func applyCapabilityGuards(plan Plan) Plan {
 			plan.HardBlocked = true
 			plan.BlockingReasons = append(plan.BlockingReasons, "suricata build does not indicate NFQ support")
 		}
+		if planContainsAction(plan.Actions, "nfq-queue-rules") && plan.Snapshot.Firewall != "iptables" && plan.Snapshot.Firewall != "nftables" {
+			plan.Blocked = true
+			plan.HardBlocked = true
+			plan.BlockingReasons = append(plan.BlockingReasons, "NFQ profile requires detected iptables or nftables backend")
+		}
 	}
 	plan.BlockingReasons = dedupeStrings(plan.BlockingReasons)
 	return plan
+}
+
+func planContainsAction(actions []PlanAction, id string) bool {
+	for _, action := range actions {
+		if action.ID == id {
+			return true
+		}
+	}
+	return false
 }
 
 func maxInt(a int, b int) int {

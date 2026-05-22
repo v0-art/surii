@@ -77,8 +77,11 @@ func runDetect(args []string, out io.Writer) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	if strings.TrimSpace(*iface) == "" {
-		return errors.New("--iface is required")
+	if err := validateIfaceArg(*iface); err != nil {
+		return err
+	}
+	if err := validatePathArg("--config-path", *configPath, false); err != nil {
+		return err
 	}
 	collector := NewCollector(NewExecRunner(false))
 	snapshot, err := collector.Collect(*iface, *configPath)
@@ -117,8 +120,11 @@ func runPlan(args []string, out io.Writer) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	if strings.TrimSpace(*iface) == "" {
-		return errors.New("--iface is required")
+	if err := validateIfaceArg(*iface); err != nil {
+		return err
+	}
+	if err := validatePathArg("--config-path", *configPath, false); err != nil {
+		return err
 	}
 	profile, err := parseProfile(*profileRaw)
 	if err != nil {
@@ -190,6 +196,15 @@ func runApply(args []string, in io.Reader, out io.Writer) error {
 	if err := requireRoot(); err != nil {
 		return err
 	}
+	if err := validateIfaceArg(*iface); err != nil {
+		return err
+	}
+	if err := validatePathArg("--config-path", *configPath, true); err != nil {
+		return err
+	}
+	if err := validatePathArg("--state-dir", *stateDir, true); err != nil {
+		return err
+	}
 	collector := NewCollector(NewExecRunner(false))
 	snapshot, err := collector.Collect(*iface, *configPath)
 	if err != nil {
@@ -237,6 +252,12 @@ func runRollback(args []string, in io.Reader, out io.Writer) error {
 	if err := requireRoot(); err != nil {
 		return err
 	}
+	if err := validateStateSelector(*statePath); err != nil {
+		return err
+	}
+	if err := validatePathArg("--state-dir", *stateDir, true); err != nil {
+		return err
+	}
 	if !*yes {
 		if !askConfirmation(in, out, "Rollback will modify system settings. Continue? [y/N]: ") {
 			return errors.New("rollback aborted by user")
@@ -267,8 +288,14 @@ func runReport(args []string, out io.Writer) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	if strings.TrimSpace(*iface) == "" {
-		return errors.New("--iface is required")
+	if err := validateIfaceArg(*iface); err != nil {
+		return err
+	}
+	if err := validatePathArg("--config-path", *configPath, false); err != nil {
+		return err
+	}
+	if err := validatePathArg("--state-dir", *stateDir, true); err != nil {
+		return err
 	}
 	collector := NewCollector(NewExecRunner(false))
 	snapshot, err := collector.Collect(*iface, *configPath)

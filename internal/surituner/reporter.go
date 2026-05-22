@@ -103,6 +103,7 @@ func RenderReportJSON(report Report) (string, error) {
 }
 
 func RenderPlanJSON(plan Plan) (string, error) {
+	plan = normalizePlan(plan)
 	raw, err := json.MarshalIndent(plan, "", "  ")
 	if err != nil {
 		return "", err
@@ -111,6 +112,7 @@ func RenderPlanJSON(plan Plan) (string, error) {
 }
 
 func normalizeReportSlices(report Report) Report {
+	report.Snapshot = normalizeSnapshot(report.Snapshot)
 	report.Warnings = nonNilStrings(report.Warnings)
 	report.Recommendations = nonNilStrings(report.Recommendations)
 	report.UnsupportedOptions = nonNilStrings(report.UnsupportedOptions)
@@ -123,6 +125,43 @@ func normalizeReportSlices(report Report) Report {
 	report.RuntimeMetrics.Acceptance = nonNilStrings(report.RuntimeMetrics.Acceptance)
 	report.RuntimeMetrics.Warnings = nonNilStrings(report.RuntimeMetrics.Warnings)
 	return report
+}
+
+func normalizePlan(plan Plan) Plan {
+	plan.Snapshot = normalizeSnapshot(plan.Snapshot)
+	plan.BlockingReasons = nonNilStrings(plan.BlockingReasons)
+	if plan.Actions == nil {
+		plan.Actions = []PlanAction{}
+	}
+	for i := range plan.Actions {
+		if plan.Actions[i].Metadata == nil {
+			plan.Actions[i].Metadata = map[string]interface{}{}
+		}
+	}
+	return plan
+}
+
+func normalizeSnapshot(snapshot SystemSnapshot) SystemSnapshot {
+	snapshot.Build.Warnings = nonNilStrings(snapshot.Build.Warnings)
+	snapshot.CPU.Warnings = nonNilStrings(snapshot.CPU.Warnings)
+	snapshot.NIC.Warnings = nonNilStrings(snapshot.NIC.Warnings)
+	snapshot.NIC.DPDKUnusedDrivers = nonNilStrings(snapshot.NIC.DPDKUnusedDrivers)
+	snapshot.Ruleset.RuleSources = nonNilStrings(snapshot.Ruleset.RuleSources)
+	snapshot.Ruleset.Warnings = nonNilStrings(snapshot.Ruleset.Warnings)
+	snapshot.Safety.Warnings = nonNilStrings(snapshot.Safety.Warnings)
+	snapshot.Warnings = nonNilStrings(snapshot.Warnings)
+	if snapshot.CPU.CoresByNUMA == nil {
+		snapshot.CPU.CoresByNUMA = map[string][]int{}
+	}
+	for node, cpus := range snapshot.CPU.CoresByNUMA {
+		if cpus == nil {
+			snapshot.CPU.CoresByNUMA[node] = []int{}
+		}
+	}
+	if snapshot.NIC.Offload == nil {
+		snapshot.NIC.Offload = map[string]string{}
+	}
+	return snapshot
 }
 
 func nonNilStrings(values []string) []string {

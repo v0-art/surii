@@ -65,6 +65,20 @@ func TestCollectDPDKPreflightAlreadyVFIOWarnsNoRollbackDriver(t *testing.T) {
 	if err := os.WriteFile(scriptPath, []byte("#!/bin/sh\nexit 0\n"), 0755); err != nil {
 		t.Fatalf("write fake dpdk-devbind: %v", err)
 	}
+	origPCIDevicesDir := pciDevicesSysfsDir
+	defer func() { pciDevicesSysfsDir = origPCIDevicesDir }()
+	pciDevicesSysfsDir = filepath.Join(dir, "pci-devices")
+	deviceDir := filepath.Join(pciDevicesSysfsDir, "0000:01:00.0")
+	groupDir := filepath.Join(dir, "iommu-groups", "42")
+	if err := os.MkdirAll(deviceDir, 0755); err != nil {
+		t.Fatalf("mkdir fake pci device: %v", err)
+	}
+	if err := os.MkdirAll(groupDir, 0755); err != nil {
+		t.Fatalf("mkdir fake iommu group: %v", err)
+	}
+	if err := os.Symlink(groupDir, filepath.Join(deviceDir, "iommu_group")); err != nil {
+		t.Fatalf("symlink fake iommu group: %v", err)
+	}
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	c := NewCollector(collectorRunner{
 		results: map[string]CommandResult{
@@ -83,6 +97,118 @@ func TestCollectDPDKPreflightAlreadyVFIOWarnsNoRollbackDriver(t *testing.T) {
 	}
 	if !strings.Contains(strings.Join(warnings, "\n"), "previous kernel driver is unknown") {
 		t.Fatalf("expected previous-driver warning, got %v", warnings)
+	}
+}
+
+func TestCollectDPDKPreflightAcceptsVFIOWhenDriverPathExists(t *testing.T) {
+	dir := t.TempDir()
+	scriptPath := filepath.Join(dir, "dpdk-devbind.py")
+	if err := os.WriteFile(scriptPath, []byte("#!/bin/sh\nexit 0\n"), 0755); err != nil {
+		t.Fatalf("write fake dpdk-devbind: %v", err)
+	}
+	vfioPath := filepath.Join(dir, "vfio-pci")
+	if err := os.Mkdir(vfioPath, 0755); err != nil {
+		t.Fatalf("mkdir fake vfio path: %v", err)
+	}
+	origVFIOPaths := vfioPCIAvailabilityPaths
+	origPCIDevicesDir := pciDevicesSysfsDir
+	defer func() { vfioPCIAvailabilityPaths = origVFIOPaths }()
+	defer func() { pciDevicesSysfsDir = origPCIDevicesDir }()
+	vfioPCIAvailabilityPaths = []string{vfioPath}
+	pciDevicesSysfsDir = filepath.Join(dir, "pci-devices")
+	deviceDir := filepath.Join(pciDevicesSysfsDir, "0000:01:00.0")
+	groupDir := filepath.Join(dir, "iommu-groups", "42")
+	if err := os.MkdirAll(deviceDir, 0755); err != nil {
+		t.Fatalf("mkdir fake pci device: %v", err)
+	}
+	if err := os.MkdirAll(groupDir, 0755); err != nil {
+		t.Fatalf("mkdir fake iommu group: %v", err)
+	}
+	if err := os.Symlink(groupDir, filepath.Join(deviceDir, "iommu_group")); err != nil {
+		t.Fatalf("symlink fake iommu group: %v", err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	c := NewCollector(collectorRunner{
+		results: map[string]CommandResult{
+			"dpdk-devbind.py --status": {
+				Stdout: "0000:01:00.0 'Intel X710' drv=ixgbe unused=vfio-pci",
+			},
+		},
+	})
+	var warnings []string
+	got := c.collectDPDKPreflight("0000:01:00.0", "ixgbe", &warnings)
+	if !got.CanBindVFIO || !got.CanRollbackBind || !got.BindReady {
+		t.Fatalf("expected vfio-ready DPDK preflight, got %+v warnings=%v", got, warnings)
+	}
+	if got.IOMMUGroup != "42" || !got.IOMMUViable {
+		t.Fatalf("expected IOMMU group 42, got %+v", got)
+	}
+}
+
+func TestCollectDPDKPreflightRejectsVFIOWhenAvailabilityUnconfirmed(t *testing.T) {
+	dir := t.TempDir()
+	scriptPath := filepath.Join(dir, "dpdk-devbind.py")
+	if err := os.WriteFile(scriptPath, []byte("#!/bin/sh\nexit 0\n"), 0755); err != nil {
+		t.Fatalf("write fake dpdk-devbind: %v", err)
+	}
+	origVFIOPaths := vfioPCIAvailabilityPaths
+	defer func() { vfioPCIAvailabilityPaths = origVFIOPaths }()
+	vfioPCIAvailabilityPaths = []string{filepath.Join(dir, "missing-vfio-pci")}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	c := NewCollector(collectorRunner{
+		results: map[string]CommandResult{
+			"dpdk-devbind.py --status": {
+				Stdout: "0000:01:00.0 'Intel X710' drv=ixgbe unused=vfio-pci",
+			},
+		},
+	})
+	var warnings []string
+	got := c.collectDPDKPreflight("0000:01:00.0", "ixgbe", &warnings)
+	if got.CanBindVFIO || got.BindReady {
+		t.Fatalf("did not expect bind readiness when vfio availability is unconfirmed: %+v", got)
+	}
+	if !strings.Contains(strings.Join(warnings, "\n"), "availability was not confirmed") {
+		t.Fatalf("expected vfio availability warning, got %v", warnings)
+	}
+}
+
+func TestCollectDPDKPreflightRejectsWhenIOMMUGroupMissing(t *testing.T) {
+	dir := t.TempDir()
+	scriptPath := filepath.Join(dir, "dpdk-devbind.py")
+	if err := os.WriteFile(scriptPath, []byte("#!/bin/sh\nexit 0\n"), 0755); err != nil {
+		t.Fatalf("write fake dpdk-devbind: %v", err)
+	}
+	vfioPath := filepath.Join(dir, "vfio-pci")
+	if err := os.Mkdir(vfioPath, 0755); err != nil {
+		t.Fatalf("mkdir fake vfio path: %v", err)
+	}
+	origVFIOPaths := vfioPCIAvailabilityPaths
+	origPCIDevicesDir := pciDevicesSysfsDir
+	defer func() { vfioPCIAvailabilityPaths = origVFIOPaths }()
+	defer func() { pciDevicesSysfsDir = origPCIDevicesDir }()
+	vfioPCIAvailabilityPaths = []string{vfioPath}
+	pciDevicesSysfsDir = filepath.Join(dir, "pci-devices")
+	if err := os.MkdirAll(filepath.Join(pciDevicesSysfsDir, "0000:01:00.0"), 0755); err != nil {
+		t.Fatalf("mkdir fake pci device: %v", err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	c := NewCollector(collectorRunner{
+		results: map[string]CommandResult{
+			"dpdk-devbind.py --status": {
+				Stdout: "0000:01:00.0 'Intel X710' drv=ixgbe unused=vfio-pci",
+			},
+		},
+	})
+	var warnings []string
+	got := c.collectDPDKPreflight("0000:01:00.0", "ixgbe", &warnings)
+	if got.IOMMUViable || got.BindReady {
+		t.Fatalf("did not expect bind-ready without IOMMU group: %+v", got)
+	}
+	if !strings.Contains(strings.Join(warnings, "\n"), "IOMMU group not found") {
+		t.Fatalf("expected IOMMU group warning, got %v", warnings)
 	}
 }
 
@@ -300,5 +426,97 @@ func TestLinkDetailsIndicateXDPSupport(t *testing.T) {
 	}
 	if linkDetailsIndicateXDPSupport("2: xdptest0: <BROADCAST> mtu 1500 qdisc noop") {
 		t.Fatalf("interface name containing xdp should not be enough")
+	}
+}
+
+func TestRSSOutputIndicatesSymmetricHash(t *testing.T) {
+	if !rssOutputIndicatesSymmetricHash("RSS hash function: symmetric-toeplitz") {
+		t.Fatalf("expected symmetric-toeplitz to prove symmetric RSS")
+	}
+	if rssOutputIndicatesSymmetricHash("RSS hash function: toeplitz") {
+		t.Fatalf("plain toeplitz should not prove symmetric RSS")
+	}
+}
+
+func TestCollectSymmetricRSSRequiresExplicitSymmetricHash(t *testing.T) {
+	c := NewCollector(collectorRunner{
+		results: map[string]CommandResult{
+			"ethtool -x eth0": {Stdout: "RSS hash function: toeplitz\n"},
+		},
+	})
+	var warnings []string
+	if c.collectSymmetricRSS("eth0", 8, 8, &warnings) {
+		t.Fatalf("did not expect queue parity alone to prove symmetric RSS")
+	}
+	if len(warnings) == 0 {
+		t.Fatalf("expected warning when symmetric RSS is not proven")
+	}
+
+	c = NewCollector(collectorRunner{
+		results: map[string]CommandResult{
+			"ethtool -x eth0": {Stdout: "RSS hash function: symmetric-xor\n"},
+		},
+	})
+	warnings = nil
+	if !c.collectSymmetricRSS("eth0", 8, 8, &warnings) {
+		t.Fatalf("expected explicit symmetric hash to prove symmetric RSS")
+	}
+}
+
+func TestKernelSupportsAFXDP(t *testing.T) {
+	tests := []struct {
+		release string
+		want    bool
+	}{
+		{release: "4.17.9", want: false},
+		{release: "4.18.0", want: true},
+		{release: "5.4.0-150-generic", want: true},
+		{release: "6.8.12", want: true},
+		{release: "not-a-kernel", want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.release, func(t *testing.T) {
+			if got := kernelSupportsAFXDP(tt.release); got != tt.want {
+				t.Fatalf("kernelSupportsAFXDP(%q)=%t want %t", tt.release, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestDetectXDPSupportInfersFromKernelRelease(t *testing.T) {
+	if _, err := os.Stat("/sys/class/net/lo"); err != nil {
+		t.Skip("loopback interface is not present in sysfs")
+	}
+	c := NewCollector(collectorRunner{
+		results: map[string]CommandResult{
+			"ip -details link show lo": {Stdout: "1: lo: <LOOPBACK,UP> mtu 65536 qdisc noqueue"},
+			"uname -r":                 {Stdout: "6.8.12-test"},
+		},
+	})
+	var warnings []string
+	if !c.detectXDPSupport("lo", &warnings) {
+		t.Fatalf("expected AF_XDP support inferred from kernel release, warnings=%v", warnings)
+	}
+	if !strings.Contains(strings.Join(warnings, "\n"), "inferred from kernel release") {
+		t.Fatalf("expected inference warning, got %v", warnings)
+	}
+}
+
+func TestDetectXDPSupportRejectsOldKernel(t *testing.T) {
+	if _, err := os.Stat("/sys/class/net/lo"); err != nil {
+		t.Skip("loopback interface is not present in sysfs")
+	}
+	c := NewCollector(collectorRunner{
+		results: map[string]CommandResult{
+			"ip -details link show lo": {Stdout: "1: lo: <LOOPBACK,UP> mtu 65536 qdisc noqueue"},
+			"uname -r":                 {Stdout: "4.17.19"},
+		},
+	})
+	var warnings []string
+	if c.detectXDPSupport("lo", &warnings) {
+		t.Fatalf("did not expect AF_XDP support for old kernel")
+	}
+	if !strings.Contains(strings.Join(warnings, "\n"), "kernel >= 4.18") {
+		t.Fatalf("expected kernel requirement warning, got %v", warnings)
 	}
 }

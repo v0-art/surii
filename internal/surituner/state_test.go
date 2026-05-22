@@ -52,3 +52,32 @@ func TestStateStore_SaveLoadLatest(t *testing.T) {
 		t.Fatalf("expected 0700 state dir permissions, got %o", got)
 	}
 }
+
+func TestStateStoreResolvePathRejectsOutsideStateDir(t *testing.T) {
+	dir := t.TempDir()
+	store := NewStateStore(dir)
+	outside := t.TempDir() + "/state.json"
+	if _, err := store.ResolvePath(outside); err == nil {
+		t.Fatalf("expected state path outside state dir to be rejected")
+	}
+	nested := dir + "/nested/state.json"
+	if _, err := store.ResolvePath(nested); err == nil {
+		t.Fatalf("expected nested state path to be rejected")
+	}
+	notJSON := dir + "/state.txt"
+	if _, err := store.ResolvePath(notJSON); err == nil {
+		t.Fatalf("expected non-json state path to be rejected")
+	}
+}
+
+func TestStateStoreLoadRejectsGroupWorldAccessibleState(t *testing.T) {
+	dir := t.TempDir()
+	store := NewStateStore(dir)
+	path := dir + "/state.json"
+	if err := os.WriteFile(path, []byte(`{"version":"v1"}`), 0644); err != nil {
+		t.Fatalf("write state: %v", err)
+	}
+	if _, err := store.Load(path); err == nil {
+		t.Fatalf("expected permissive state file to be rejected")
+	}
+}

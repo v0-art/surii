@@ -101,6 +101,15 @@ func (s *StateStore) Load(path string) (StateFile, error) {
 		if err != nil {
 			return StateFile{}, err
 		}
+	} else {
+		var err error
+		path, err = s.ResolvePath(path)
+		if err != nil {
+			return StateFile{}, err
+		}
+	}
+	if err := validateStateFileTrust(path); err != nil {
+		return StateFile{}, err
 	}
 	raw, err := os.ReadFile(path)
 	if err != nil {
@@ -117,7 +126,48 @@ func (s *StateStore) ResolvePath(path string) (string, error) {
 	if path == "latest" || strings.TrimSpace(path) == "" {
 		return s.Latest()
 	}
-	return path, nil
+	cleanDir, err := filepath.Abs(filepath.Clean(s.Dir))
+	if err != nil {
+		return "", fmt.Errorf("resolve state dir: %w", err)
+	}
+	cleanPath, err := filepath.Abs(filepath.Clean(path))
+	if err != nil {
+		return "", fmt.Errorf("resolve state path: %w", err)
+	}
+	if !filepath.IsAbs(path) {
+		return "", fmt.Errorf("state path must be absolute or latest: %s", path)
+	}
+	rel, err := filepath.Rel(cleanDir, cleanPath)
+	if err != nil {
+		return "", fmt.Errorf("resolve state path relative to state dir: %w", err)
+	}
+	if rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
+		return "", fmt.Errorf("state path must be inside state dir %s: %s", cleanDir, cleanPath)
+	}
+	if filepath.Dir(cleanPath) != cleanDir {
+		return "", fmt.Errorf("state path must be a direct state file in %s: %s", cleanDir, cleanPath)
+	}
+	if !strings.HasSuffix(filepath.Base(cleanPath), ".json") {
+		return "", fmt.Errorf("state path must point to a .json state file: %s", cleanPath)
+	}
+	return cleanPath, nil
+}
+
+func validateStateFileTrust(path string) error {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return fmt.Errorf("stat state: %w", err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("state file must not be a symlink: %s", path)
+	}
+	if info.IsDir() {
+		return fmt.Errorf("state path is a directory: %s", path)
+	}
+	if info.Mode().Perm()&0077 != 0 {
+		return fmt.Errorf("state file permissions must not be group/world accessible: %s", path)
+	}
+	return nil
 }
 
 func (s *StateStore) Latest() (string, error) {
