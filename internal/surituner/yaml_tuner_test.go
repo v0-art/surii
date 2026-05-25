@@ -260,9 +260,9 @@ func TestApplyTuneMap_ConfiguresExceptionPoliciesByIPSMode(t *testing.T) {
 		wantNFQFailOpen bool
 	}{
 		{
-			name:            "strict fail close auto",
+			name:            "strict fail close drop flow",
 			mode:            IPSModeStrict,
-			wantPolicy:      "auto",
+			wantPolicy:      "drop-flow",
 			wantNFQFailOpen: false,
 		},
 		{

@@ -13,7 +13,7 @@ func RenderPlanHuman(plan Plan) string {
 	fmt.Fprintf(&b, "Plan generated: %s\n", plan.GeneratedAt.Format(time.RFC3339))
 	fmt.Fprintf(&b, "Profile: %s | Scope: %s | IPS mode: %s | Interface: %s\n", plan.Profile, plan.Scope, plan.IPSMode, plan.Snapshot.Iface)
 	if plan.Blocked {
-		fmt.Fprintf(&b, "Guardrail status: BLOCKED\n")
+		fmt.Fprintf(&b, "Plan status: BLOCKED\n")
 		if plan.HardBlocked {
 			fmt.Fprintf(&b, "Blocking type: HARD (cannot be bypassed by --force)\n")
 		}
@@ -21,7 +21,7 @@ func RenderPlanHuman(plan Plan) string {
 			fmt.Fprintf(&b, "  - %s\n", reason)
 		}
 	} else {
-		fmt.Fprintf(&b, "Guardrail status: OK\n")
+		fmt.Fprintf(&b, "Plan status: OK\n")
 	}
 	fmt.Fprintf(&b, "\nActions:\n")
 	for i, action := range plan.Actions {

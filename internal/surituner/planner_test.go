@@ -81,6 +81,36 @@ func TestBuildPlan_GuardrailsBlockOSActionsOnManagementIface(t *testing.T) {
 	}
 }
 
+func TestBuildPlan_GuardrailsPreserveHardBlockReasons(t *testing.T) {
+	snapshot := SystemSnapshot{
+		Iface: "eth0",
+		Build: BuildCapabilities{
+			SupportsDPDK: true,
+		},
+		NIC: NICInfo{
+			Driver:     "ixgbe",
+			PCIAddress: "0000:01:00.0",
+		},
+		Safety: SafetyContext{
+			IsManagementIface: true,
+		},
+	}
+	plan, err := NewPlanner().BuildPlan(snapshot, ProfileDPDK, ScopeFull, IPSModeStrict, false)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !plan.Blocked || !plan.HardBlocked {
+		t.Fatalf("expected combined guardrail and hard block, got blocked=%t hard=%t", plan.Blocked, plan.HardBlocked)
+	}
+	reasons := strings.Join(plan.BlockingReasons, "\n")
+	if !strings.Contains(reasons, "dpdk-devbind.py") {
+		t.Fatalf("expected hard block reason to be preserved, got %v", plan.BlockingReasons)
+	}
+	if !strings.Contains(reasons, "guardrail blocked") {
+		t.Fatalf("expected guardrail reason to be present, got %v", plan.BlockingReasons)
+	}
+}
+
 func TestBuildPlan_GuardrailsAllowConfigOnlyOnManagementIface(t *testing.T) {
 	snapshot := SystemSnapshot{
 		Iface: "eth0",
@@ -190,6 +220,59 @@ func TestBuildPlan_CapabilityGuardBlocksWhenDPDKBindNotReady(t *testing.T) {
 	for _, action := range plan.Actions {
 		if strings.Contains(action.RollbackCmd, "ixgbe") || strings.Contains(strings.Join(action.RollbackExec, " "), "ixgbe") {
 			t.Fatalf("planner must not invent ixgbe rollback driver when current driver is unknown: %+v", action)
+		}
+	}
+}
+
+func TestBuildPlan_DPDKConfigOnlyDoesNotRequireBindPreflight(t *testing.T) {
+	snapshot := SystemSnapshot{
+		Iface: "eth0",
+		Build: BuildCapabilities{
+			SupportsDPDK: true,
+		},
+		NIC: NICInfo{
+			PCIAddress: "0000:01:00.0",
+		},
+		Safety: SafetyContext{
+			IsManagementIface: false,
+		},
+	}
+	plan, err := NewPlanner().BuildPlan(snapshot, ProfileDPDK, ScopeConfigOnly, IPSModeIDS, false)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if plan.Blocked || plan.HardBlocked {
+		t.Fatalf("did not expect config-only DPDK plan to require bind preflight, blocked=%t hard=%t reasons=%v", plan.Blocked, plan.HardBlocked, plan.BlockingReasons)
+	}
+	if len(plan.Actions) != 1 || plan.Actions[0].Kind != "yaml" {
+		t.Fatalf("expected only YAML action for config-only DPDK plan, got %+v", plan.Actions)
+	}
+}
+
+func TestBuildPlan_DPDKOSTuningDoesNotRequireDPDKCapability(t *testing.T) {
+	snapshot := SystemSnapshot{
+		Iface: "eth0",
+		CPU: CPUInfo{
+			LogicalCores: 4,
+		},
+		NIC: NICInfo{
+			RSSCombinedCurrent: 2,
+			RSSCombinedMax:     4,
+		},
+		Safety: SafetyContext{
+			IsManagementIface: false,
+		},
+	}
+	plan, err := NewPlanner().BuildPlan(snapshot, ProfileDPDK, ScopeOSTuning, IPSModeIDS, false)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if plan.HardBlocked {
+		t.Fatalf("did not expect os-tuning DPDK plan to require DPDK build/bind preflight: %v", plan.BlockingReasons)
+	}
+	for _, action := range plan.Actions {
+		if action.Kind == "yaml" || action.Kind == "dpdk-bind" || action.Kind == "node-hugepages" {
+			t.Fatalf("did not expect DPDK config/full action in os-tuning scope: %+v", action)
 		}
 	}
 }
@@ -319,6 +402,29 @@ func TestBuildPlan_NFQHardBlocksUnknownFirewallBackend(t *testing.T) {
 	}
 	if !strings.Contains(strings.Join(plan.BlockingReasons, "\n"), "iptables or nftables") {
 		t.Fatalf("expected firewall backend blocking reason, got %v", plan.BlockingReasons)
+	}
+}
+
+func TestBuildPlan_NFQConfigOnlyDoesNotRequireFirewallBackend(t *testing.T) {
+	snapshot := SystemSnapshot{
+		Iface:    "eth0",
+		Firewall: "unknown",
+		Build: BuildCapabilities{
+			SupportsNFQ: true,
+		},
+		Safety: SafetyContext{
+			IsManagementIface: false,
+		},
+	}
+	plan, err := NewPlanner().BuildPlan(snapshot, ProfileNFQ, ScopeConfigOnly, IPSModeStrict, false)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if plan.Blocked || plan.HardBlocked {
+		t.Fatalf("did not expect config-only NFQ plan to require firewall backend, blocked=%t hard=%t reasons=%v", plan.Blocked, plan.HardBlocked, plan.BlockingReasons)
+	}
+	if len(plan.Actions) != 1 || plan.Actions[0].Kind != "yaml" {
+		t.Fatalf("expected only YAML action for config-only NFQ plan, got %+v", plan.Actions)
 	}
 }
 

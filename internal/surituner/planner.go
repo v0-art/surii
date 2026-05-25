@@ -363,7 +363,7 @@ func applyGuardrails(plan Plan, force bool) Plan {
 	if force {
 		return plan
 	}
-	var reasons []string
+	reasons := append([]string(nil), plan.BlockingReasons...)
 	for _, action := range plan.Actions {
 		if action.BlockedByGuardrail {
 			reasons = append(reasons, fmt.Sprintf("guardrail blocked %s on management interface %s", action.ID, plan.Snapshot.Iface))
@@ -394,59 +394,63 @@ func isManagementGuardedAction(action PlanAction) bool {
 func applyCapabilityGuards(plan Plan) Plan {
 	switch plan.Profile {
 	case ProfileDPDK:
-		if !plan.Snapshot.Build.SupportsDPDK {
+		needsDPDKConfig := plan.Scope == ScopeConfigOnly || plan.Scope == ScopeFull
+		needsDPDKBindPreflight := plan.Scope == ScopeFull
+		if needsDPDKConfig && !plan.Snapshot.Build.SupportsDPDK {
 			plan.Blocked = true
 			plan.HardBlocked = true
 			plan.BlockingReasons = append(plan.BlockingReasons, "suricata build does not indicate DPDK support")
 		}
-		if strings.TrimSpace(plan.Snapshot.NIC.PCIAddress) == "" {
+		if needsDPDKConfig && strings.TrimSpace(plan.Snapshot.NIC.PCIAddress) == "" {
 			plan.Blocked = true
 			plan.HardBlocked = true
 			plan.BlockingReasons = append(plan.BlockingReasons, "dpdk profile requires NIC PCI address preflight")
 		}
-		if !plan.Snapshot.NIC.DPDKDevbindPresent {
+		if needsDPDKBindPreflight && !plan.Snapshot.NIC.DPDKDevbindPresent {
 			plan.Blocked = true
 			plan.HardBlocked = true
 			plan.BlockingReasons = append(plan.BlockingReasons, "dpdk-devbind.py is required for DPDK bind/unbind preflight")
 		}
-		if strings.TrimSpace(plan.Snapshot.NIC.DPDKStatusLine) == "" {
+		if needsDPDKBindPreflight && strings.TrimSpace(plan.Snapshot.NIC.DPDKStatusLine) == "" {
 			plan.Blocked = true
 			plan.HardBlocked = true
 			plan.BlockingReasons = append(plan.BlockingReasons, "dpdk-devbind status entry not found; bind/unbind preflight failed")
 		}
-		if !plan.Snapshot.NIC.DPDKCanBindVFIO {
+		if needsDPDKBindPreflight && !plan.Snapshot.NIC.DPDKCanBindVFIO {
 			plan.Blocked = true
 			plan.HardBlocked = true
 			plan.BlockingReasons = append(plan.BlockingReasons, "vfio-pci bind preflight failed")
 		}
-		if !plan.Snapshot.NIC.DPDKCanRollback && !strings.EqualFold(plan.Snapshot.NIC.DPDKCurrentDriver, "vfio-pci") {
+		if needsDPDKBindPreflight && !plan.Snapshot.NIC.DPDKCanRollback && !strings.EqualFold(plan.Snapshot.NIC.DPDKCurrentDriver, "vfio-pci") {
 			plan.Blocked = true
 			plan.HardBlocked = true
 			plan.BlockingReasons = append(plan.BlockingReasons, "rollback bind preflight failed (current kernel driver unknown)")
 		}
-		if !plan.Snapshot.NIC.DPDKBindReady {
+		if needsDPDKBindPreflight && !plan.Snapshot.NIC.DPDKBindReady {
 			plan.Blocked = true
 			plan.HardBlocked = true
 			plan.BlockingReasons = append(plan.BlockingReasons, "dpdk bind/unbind readiness preflight failed")
 		}
-		if !plan.Snapshot.NIC.DPDKIOMMUViable {
+		if needsDPDKBindPreflight && !plan.Snapshot.NIC.DPDKIOMMUViable {
 			plan.Blocked = true
 			plan.HardBlocked = true
 			plan.BlockingReasons = append(plan.BlockingReasons, "dpdk vfio-pci preflight requires a detectable IOMMU group for the NIC")
 		}
 	case ProfileAFXDP:
-		if !plan.Snapshot.Build.SupportsAFXDP {
+		needsAFXDPConfig := plan.Scope == ScopeConfigOnly || plan.Scope == ScopeFull
+		if needsAFXDPConfig && !plan.Snapshot.Build.SupportsAFXDP {
 			plan.Blocked = true
 			plan.HardBlocked = true
 			plan.BlockingReasons = append(plan.BlockingReasons, "suricata build does not indicate AF_XDP support")
 		}
-		if !plan.Snapshot.NIC.XDPSupportDetected {
+		if needsAFXDPConfig && !plan.Snapshot.NIC.XDPSupportDetected {
 			plan.Blocked = true
 			plan.HardBlocked = true
 			plan.BlockingReasons = append(plan.BlockingReasons, "AF_XDP profile requires kernel/interface XDP support preflight")
 		}
 	case ProfileNFQ:
-		if !plan.Snapshot.Build.SupportsNFQ {
+		needsNFQConfig := plan.Scope == ScopeConfigOnly || plan.Scope == ScopeFull
+		if needsNFQConfig && !plan.Snapshot.Build.SupportsNFQ {
 			plan.Blocked = true
 			plan.HardBlocked = true
 			plan.BlockingReasons = append(plan.BlockingReasons, "suricata build does not indicate NFQ support")

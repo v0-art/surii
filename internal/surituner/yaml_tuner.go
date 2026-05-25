@@ -444,7 +444,7 @@ func calcMemCaps(totalRAMMB int, enabledRules int) map[string]string {
 func mapIPSModeToExceptionPolicy(mode IPSMode) string {
 	switch mode {
 	case IPSModeStrict:
-		return "auto"
+		return "drop-flow"
 	case IPSModeAvailability:
 		return "pass-flow"
 	case IPSModeIDS:
