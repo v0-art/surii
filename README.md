@@ -418,6 +418,7 @@ Last local verification in this workspace:
 
 - `go version`: not available in `PATH`.
 - `/home/vol/.local/go/bin/go version`: `go1.26.3 linux/amd64`.
+- `make`: not installed in this VM; final continuation checks were run with direct Go commands.
 - `go test ./...`: PASS with `GOCACHE=/tmp/go-build-cache`.
 - `go test -race ./...`: PASS with Zig and caches under `/tmp`.
 - `go vet ./...`: PASS.
@@ -432,9 +433,10 @@ Last local verification in this workspace:
   - AF_XDP: `/var/lib/surituner/state/20260525T152426.729641239Z.json`, status `rolled_back`, all rollback records `ok`.
   - NFQ: `/var/lib/surituner/state/20260525T152528.172012317Z.json`, status `rolled_back`, all rollback records `ok`.
   - DPDK: `/var/lib/surituner/state/20260525T152634.377556496Z.json`, status `rolled_back`, all rollback records `ok`.
-- DPDK `ens37` config-only state after DPDK tooling install: `/var/lib/surituner/state/20260526T135218.593663238Z.json`, status `rolled_back`, all rollback records `ok`.
-- DPDK `ens37` os-tuning state: `/var/lib/surituner/state/20260526T135338.354560526Z.json`, status `rolled_back`, 6 applied actions, 6 rollback records, all rollback records `ok`.
+- Latest DPDK `ens37` config-only state after DPDK tooling install: `/var/lib/surituner/state/20260526T142343.518558532Z.json`, status `rolled_back`, 1 applied action, 4 rollback records, all rollback records `ok`.
+- Latest DPDK `ens37` os-tuning state: `/var/lib/surituner/state/20260526T142503.887135814Z.json`, status `rolled_back`, 6 applied actions, 6 rollback records, all rollback records `ok`; ring, sysctl, and promiscuous mode were restored.
 - `sudo ./scripts/check_dpdk_prereqs.sh --iface ens37`: PASS; reports `dpdk-devbind.py` present, `unused=vfio-pci`, rollback driver `e1000`, and expected hard-block due to missing IOMMU group.
+- DPDK `ens37` full apply with `--force`: correctly refused before live changes with non-overridable DPDK blockers; NIC stayed bound to `e1000`, ring/sysctl/promisc stayed restored, and `suricata.service` stayed `active`.
 - AF_PACKET full state: `/var/lib/surituner/state/20260525T154301.499029222Z.json`, status `rolled_back`, 8 applied actions, 11 rollback records, all rollback records `ok`.
 - NFQ full failure state: `/var/lib/surituner/state/20260525T154527.193498144Z.json`, status `rolled_back_after_failure`, failed at missing `nft inet filter forward` chain, 10 rollback records, all rollback records `ok`.
 - Lab veth pre-state safety state: `/var/lib/surituner/state/20260525T160310.461230908Z.json`, status `failed`, zero applied actions, failure before live changes due to missing `ethtool -g` and IRQ pre-state on `suri0`.
