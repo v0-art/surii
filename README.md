@@ -30,6 +30,8 @@ What has also been verified on this host:
 - Additional real-host `config-only apply + rollback` checks for AF_XDP, NFQ, and DPDK: PASS.
 - Real AF_PACKET `--full --force apply + rollback` on `ens33`: PASS, including OS/NIC tuning, IRQ affinity, systemd drop-in, service restart, YAML restore, and OS/NIC rollback.
 - Real NFQ `--full --force` failure transaction on `ens33`: PASS. Apply failed at the missing `nft inet filter forward` chain and auto-rollback restored YAML, OS/NIC settings, and service state without rollback errors.
+- A non-management lab veth pair `suri0`/`suri1` was created inside the VM for isolated interface tests. Default route remained on `ens33`; `suri0` is not detected as the management interface.
+- AF_PACKET full apply on `suri0` was refused before live changes because veth has no parseable ring-buffer pre-state and no IRQ affinity pre-state. The resulting state had zero applied actions, which confirms pre-state safety on unsupported virtual interfaces.
 - The smoke created state, validated tuned YAML with `suricata -T`, restarted and checked `suricata.service`, rolled back YAML, validated restored YAML, restarted and checked service again.
 - Full apply on `ens33` was blocked by management-interface guardrails as expected.
 - Real dry-run matrix for `af-packet`, `dpdk`, `af-xdp`, and `nfq` across `config-only`, `os-tuning`, and `full` was checked against scope separation, hard blockers, and management-interface guardrails.
@@ -410,6 +412,7 @@ Last local verification in this workspace:
   - DPDK: `/var/lib/surituner/state/20260525T152634.377556496Z.json`, status `rolled_back`, all rollback records `ok`.
 - AF_PACKET full state: `/var/lib/surituner/state/20260525T154301.499029222Z.json`, status `rolled_back`, 8 applied actions, 11 rollback records, all rollback records `ok`.
 - NFQ full failure state: `/var/lib/surituner/state/20260525T154527.193498144Z.json`, status `rolled_back_after_failure`, failed at missing `nft inet filter forward` chain, 10 rollback records, all rollback records `ok`.
+- Lab veth pre-state safety state: `/var/lib/surituner/state/20260525T160310.461230908Z.json`, status `failed`, zero applied actions, failure before live changes due to missing `ethtool -g` and IRQ pre-state on `suri0`.
 - Real plan matrix on `ens33`: config-only plans are unblocked where build/interface preflight allows them; OS/full plans are blocked by management-interface guardrails; DPDK full additionally preserves non-bypassable DPDK preflight blockers.
 - Root negative apply checks: AF_PACKET full without `--force` is blocked before live changes; DPDK full with `--force` still refuses hard capability blockers; rollback with an outside state path is rejected.
 - Root state trust checks: world-readable state files and symlink state files are rejected before rollback.
@@ -422,6 +425,30 @@ Last local verification in this workspace:
 - `surituner-profile.conf` systemd drop-in after full rollback: absent; only the e2e timeout drop-in remains.
 - Post-rollback `ens33` checks after full apply/failure tests: ring RX/TX restored to `256`, promiscuous mode off, sysctl buffer values restored, and `suricata -T -c /etc/suricata/suricata.yaml` passes.
 - `golangci-lint`: not run because the binary is not installed.
+
+### Lab Veth Interface
+
+For non-management interface tests inside a VM, a temporary veth pair can be created:
+
+```bash
+sudo ip link add suri0 type veth peer name suri1
+sudo ip addr add 10.250.0.1/30 dev suri0
+sudo ip addr add 10.250.0.2/30 dev suri1
+sudo ip link set suri0 up
+sudo ip link set suri1 up
+```
+
+This is useful for guardrail and pre-state tests, but it is not a replacement for a second PCI NIC:
+
+- DPDK bind requires a PCI-backed interface, `dpdk-devbind.py`, vfio-pci/IOMMU readiness, and rollback driver knowledge.
+- Full OS/NIC tuning requires hardware features such as ring buffers and IRQ affinity; veth does not provide them.
+- AF_XDP can be explored on virtual interfaces only as a limited generic-XDP lab case, not as production zero-copy validation.
+
+Remove the lab pair with:
+
+```bash
+sudo ip link del suri0
+```
 
 ### Test Coverage
 
