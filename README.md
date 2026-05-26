@@ -32,14 +32,18 @@ What has also been verified on this host:
 - Real NFQ `--full --force` failure transaction on `ens33`: PASS. Apply failed at the missing `nft inet filter forward` chain and auto-rollback restored YAML, OS/NIC settings, and service state without rollback errors.
 - A non-management lab veth pair `suri0`/`suri1` was created inside the VM for isolated interface tests. Default route remained on `ens33`; `suri0` is not detected as the management interface.
 - AF_PACKET full apply on `suri0` was refused before live changes because veth has no parseable ring-buffer pre-state and no IRQ affinity pre-state. The resulting state had zero applied actions, which confirms pre-state safety on unsupported virtual interfaces.
+- A second VM NIC `ens37` was found and verified as non-management/host-only: default route and SSH management remain on `ens33`.
+- DPDK tooling was installed for lab checks (`dpdk-devbind.py` present), `vfio-pci` was loaded, and `dpdk.service` autostart was disabled to avoid boot-time DPDK runtime side effects.
+- DPDK `config-only apply + rollback` and `os-tuning apply + rollback` on `ens37`: PASS.
+- DPDK `full` on `ens37` correctly hard-blocks before live bind because the VM does not expose an IOMMU group for PCI `0000:02:05.0`.
 - The smoke created state, validated tuned YAML with `suricata -T`, restarted and checked `suricata.service`, rolled back YAML, validated restored YAML, restarted and checked service again.
 - Full apply on `ens33` was blocked by management-interface guardrails as expected.
 - Real dry-run matrix for `af-packet`, `dpdk`, `af-xdp`, and `nfq` across `config-only`, `os-tuning`, and `full` was checked against scope separation, hard blockers, and management-interface guardrails.
 
-What still must be verified on a dedicated production-like capture host:
+What still must be verified on an IOMMU-capable dedicated capture NIC:
 
-- Full root E2E with a non-management capture NIC, real IRQ paths, real ethtool support, real firewall backend, and real rollback after OS/NIC/full profile apply.
-- Hardware-specific behavior for DPDK bind/unbind, AF_XDP zero-copy support, RSS symmetry, and NUMA hugepage restore.
+- DPDK full bind/unbind with `/sys/class/net/<iface>/device/iommu_group` present and `dpdk-devbind.py --status` showing `unused=vfio-pci`.
+- Hardware-specific AF_XDP zero-copy support, RSS symmetry, and NUMA hugepage restore on production-like hardware.
 
 ## Build
 
@@ -323,6 +327,23 @@ State includes:
 - Requires detectable IOMMU group.
 - Uses NUMA-local HugePages action in full mode.
 
+For a real DPDK full apply, the capture NIC must be separate from management traffic and the host/VM must expose an IOMMU group:
+
+```bash
+sudo ./scripts/check_dpdk_prereqs.sh --iface <capture_iface> --install-tools
+ls -l /sys/class/net/<capture_iface>/device/iommu_group
+sudo dpdk-devbind.py --status
+```
+
+The expected ready shape is:
+
+- `dpdk-devbind.py` is present.
+- `vfio-pci` appears in the device `unused=` list.
+- `iommu_group` exists for the PCI device.
+- SuriTuner `plan --profile dpdk --scope full` is not hard-blocked.
+
+In this VM, `ens37` is safe as a non-management test NIC, but DPDK full remains correctly hard-blocked because `0000:02:05.0` has no IOMMU group.
+
 ### AF_XDP
 
 - Requires Suricata AF_XDP build support.
@@ -357,6 +378,7 @@ internal/surituner/validation.go   CLI input validation
 scripts/ci.sh                      local CI checks
 scripts/e2e_real_smoke.sh          real-host smoke test
 scripts/install_suricata.sh        Debian/Ubuntu Suricata setup helper
+scripts/check_dpdk_prereqs.sh      safe DPDK tooling/preflight helper, no bind/unbind
 ```
 
 ### Local Checks
@@ -410,6 +432,9 @@ Last local verification in this workspace:
   - AF_XDP: `/var/lib/surituner/state/20260525T152426.729641239Z.json`, status `rolled_back`, all rollback records `ok`.
   - NFQ: `/var/lib/surituner/state/20260525T152528.172012317Z.json`, status `rolled_back`, all rollback records `ok`.
   - DPDK: `/var/lib/surituner/state/20260525T152634.377556496Z.json`, status `rolled_back`, all rollback records `ok`.
+- DPDK `ens37` config-only state after DPDK tooling install: `/var/lib/surituner/state/20260526T135218.593663238Z.json`, status `rolled_back`, all rollback records `ok`.
+- DPDK `ens37` os-tuning state: `/var/lib/surituner/state/20260526T135338.354560526Z.json`, status `rolled_back`, 6 applied actions, 6 rollback records, all rollback records `ok`.
+- `sudo ./scripts/check_dpdk_prereqs.sh --iface ens37`: PASS; reports `dpdk-devbind.py` present, `unused=vfio-pci`, rollback driver `e1000`, and expected hard-block due to missing IOMMU group.
 - AF_PACKET full state: `/var/lib/surituner/state/20260525T154301.499029222Z.json`, status `rolled_back`, 8 applied actions, 11 rollback records, all rollback records `ok`.
 - NFQ full failure state: `/var/lib/surituner/state/20260525T154527.193498144Z.json`, status `rolled_back_after_failure`, failed at missing `nft inet filter forward` chain, 10 rollback records, all rollback records `ok`.
 - Lab veth pre-state safety state: `/var/lib/surituner/state/20260525T160310.461230908Z.json`, status `failed`, zero applied actions, failure before live changes due to missing `ethtool -g` and IRQ pre-state on `suri0`.
