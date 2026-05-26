@@ -55,12 +55,15 @@ func (p *Planner) BuildPlan(snapshot SystemSnapshot, profile CaptureProfile, sco
 
 func (p *Planner) buildYAMLAction(snapshot SystemSnapshot, profile CaptureProfile, ipsMode IPSMode) PlanAction {
 	mode := "workers"
-	if profile == ProfileNFQ {
+	if profile == ProfileNFQ || profile == ProfilePCAP {
 		mode = "autofp"
 	}
 	reason := "Align Suricata runmode, affinity and memory caps with hardware and ruleset size."
 	if profile == ProfileNFQ {
 		reason = "NFQ IPS path requires autofp and queue-aware exception policy."
+	}
+	if profile == ProfilePCAP {
+		reason = "PCAP capture path requires autofp and pcap interface tuning."
 	}
 	return PlanAction{
 		ID:           "yaml-tuning",
@@ -116,6 +119,8 @@ func buildSuricataExecStart(snapshot SystemSnapshot, profile CaptureProfile) str
 		return fmt.Sprintf("/usr/bin/suricata -D --af-xdp -c %s --pidfile /var/run/suricata/suricata.pid", configArg)
 	case ProfileNFQ:
 		return fmt.Sprintf("/usr/bin/suricata -D -q 0 --runmode autofp -c %s --pidfile /var/run/suricata/suricata.pid", configArg)
+	case ProfilePCAP:
+		return fmt.Sprintf("/usr/bin/suricata -D -i %s -c %s --pidfile /var/run/suricata/suricata.pid", systemdExecArg(iface), configArg)
 	default:
 		if iface != "" {
 			return fmt.Sprintf("/usr/bin/suricata -D %s -c %s --pidfile /var/run/suricata/suricata.pid", systemdExecArg("--af-packet="+iface), configArg)
@@ -384,7 +389,7 @@ func isManagementGuardedAction(action PlanAction) bool {
 		return true
 	}
 	switch strings.ToLower(strings.TrimSpace(action.Kind)) {
-	case "irq", "ethtool-k", "ethtool-g", "ethtool-l", "sysctl", "ip-link", "dpdk-bind", "node-hugepages", "hugepages", "af-xdp", "nfq-rules":
+	case "irq", "ethtool-k", "ethtool-g", "ethtool-l", "sysctl", "ip-link", "dpdk-bind", "node-hugepages", "hugepages", "af-xdp", "nfq-rules", "systemd-profile":
 		return true
 	default:
 		return false
@@ -438,15 +443,23 @@ func applyCapabilityGuards(plan Plan) Plan {
 		}
 	case ProfileAFXDP:
 		needsAFXDPConfig := plan.Scope == ScopeConfigOnly || plan.Scope == ScopeFull
+		needsAFXDPInterface := plan.Scope == ScopeFull
+		kernelSupported := plan.Snapshot.NIC.XDPKernelSupported || plan.Snapshot.NIC.XDPSupportDetected
+		interfaceSignalDetected := plan.Snapshot.NIC.XDPInterfaceSignalDetected || plan.Snapshot.NIC.XDPSupportDetected
 		if needsAFXDPConfig && !plan.Snapshot.Build.SupportsAFXDP {
 			plan.Blocked = true
 			plan.HardBlocked = true
 			plan.BlockingReasons = append(plan.BlockingReasons, "suricata build does not indicate AF_XDP support")
 		}
-		if needsAFXDPConfig && !plan.Snapshot.NIC.XDPSupportDetected {
+		if needsAFXDPConfig && !kernelSupported {
 			plan.Blocked = true
 			plan.HardBlocked = true
-			plan.BlockingReasons = append(plan.BlockingReasons, "AF_XDP profile requires kernel/interface XDP support preflight")
+			plan.BlockingReasons = append(plan.BlockingReasons, "AF_XDP profile requires Linux kernel >= 4.18 preflight")
+		}
+		if needsAFXDPInterface && !interfaceSignalDetected {
+			plan.Blocked = true
+			plan.HardBlocked = true
+			plan.BlockingReasons = append(plan.BlockingReasons, "AF_XDP full profile requires interface XDP support signal preflight")
 		}
 	case ProfileNFQ:
 		needsNFQConfig := plan.Scope == ScopeConfigOnly || plan.Scope == ScopeFull

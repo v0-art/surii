@@ -183,7 +183,7 @@ func applyTuneMap(cfg map[string]interface{}, opts TuneOptions) []string {
 
 	runmode := "workers"
 	switch opts.Profile {
-	case ProfileNFQ:
+	case ProfileNFQ, ProfilePCAP:
 		runmode = "autofp"
 	}
 	setNested(cfg, []string{"runmode"}, runmode)
@@ -209,7 +209,7 @@ func applyTuneMap(cfg map[string]interface{}, opts TuneOptions) []string {
 	setNested(cfg, []string{"flow", "memcap"}, memcaps["flow"])
 	changes = append(changes, "updated stream/reassembly/host/flow memcaps")
 
-	exceptionPolicy := mapIPSModeToExceptionPolicy(opts.IPSMode)
+	exceptionPolicy := mapIPSModeToExceptionPolicy(opts.Profile, opts.IPSMode)
 	setNested(cfg, []string{"exception-policy"}, exceptionPolicy)
 	changes = append(changes, fmt.Sprintf("set exception-policy=%s", exceptionPolicy))
 
@@ -289,6 +289,17 @@ func applyTuneMap(cfg map[string]interface{}, opts TuneOptions) []string {
 			delete(nfq, "fail-open")
 		}
 		changes = append(changes, "configured nfq mode/batchcount")
+	case ProfilePCAP:
+		entries := ensureArrayMap(cfg, "pcap")
+		if len(entries) == 0 {
+			entries = append(entries, map[string]interface{}{})
+		}
+		iface := strings.TrimSpace(opts.Iface)
+		if iface != "" {
+			entries[0]["interface"] = iface
+			changes = append(changes, fmt.Sprintf("pcap interface=%s", iface))
+		}
+		cfg["pcap"] = entries
 	}
 	return changes
 }
@@ -441,7 +452,7 @@ func calcMemCaps(totalRAMMB int, enabledRules int) map[string]string {
 	}
 }
 
-func mapIPSModeToExceptionPolicy(mode IPSMode) string {
+func mapIPSModeToExceptionPolicy(_ CaptureProfile, mode IPSMode) string {
 	switch mode {
 	case IPSModeStrict:
 		return "drop-flow"

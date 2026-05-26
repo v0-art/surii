@@ -62,7 +62,7 @@ func printRootHelp(out io.Writer) {
 	fmt.Fprintln(out, "")
 	fmt.Fprintln(out, "Usage:")
 	fmt.Fprintln(out, "  surituner detect --iface <name> [--json]")
-	fmt.Fprintln(out, "  surituner plan --profile <af-packet|dpdk|af-xdp|nfq> --iface <name> [--ips-mode <strict|availability|ids>] [--config-path <path>] [--json] [--force]")
+	fmt.Fprintln(out, "  surituner plan --profile <af-packet|dpdk|af-xdp|nfq|pcap> --iface <name> [--ips-mode <strict|availability|ids>] [--config-path <path>] [--json] [--force]")
 	fmt.Fprintln(out, "  surituner apply --profile <...> --iface <name> [--ips-mode <strict|availability|ids>] [--config-path <path>] [--config-only|--os-tuning|--full] [--yes] [--force]")
 	fmt.Fprintln(out, "  surituner rollback --state <path|latest> [--yes]")
 	fmt.Fprintln(out, "  surituner report --iface <name> [--config-path <path>] [--json]")

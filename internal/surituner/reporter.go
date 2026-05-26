@@ -51,7 +51,7 @@ func RenderSnapshotHuman(snapshot SystemSnapshot) string {
 		snapshot.Build.SupportsHWLOC,
 	)
 	fmt.Fprintf(&b, "CPU: cores=%d numa_nodes=%d\n", snapshot.CPU.LogicalCores, snapshot.CPU.NUMANodes)
-	fmt.Fprintf(&b, "NIC: driver=%s pci=%s numa=%d rss=%d/%d queues(rx/tx)=%d/%d symmetric_rss=%t xdp_support=%t promisc=%t\n",
+	fmt.Fprintf(&b, "NIC: driver=%s pci=%s numa=%d rss=%d/%d queues(rx/tx)=%d/%d symmetric_rss=%t xdp_kernel=%t xdp_iface_signal=%t xdp_support=%t af_xdp_zero_copy=%t promisc=%t\n",
 		emptyIf(snapshot.NIC.Driver, "unknown"),
 		emptyIf(snapshot.NIC.PCIAddress, "unknown"),
 		snapshot.NIC.NUMANode,
@@ -60,7 +60,10 @@ func RenderSnapshotHuman(snapshot SystemSnapshot) string {
 		snapshot.NIC.RXQueues,
 		snapshot.NIC.TXQueues,
 		snapshot.NIC.SymmetricRSS,
+		snapshot.NIC.XDPKernelSupported,
+		snapshot.NIC.XDPInterfaceSignalDetected,
 		snapshot.NIC.XDPSupportDetected,
+		snapshot.NIC.AFXDPZeroCopyProven,
 		snapshot.NIC.Promisc,
 	)
 	if strings.TrimSpace(snapshot.NIC.DPDKStatusLine) != "" {
@@ -78,9 +81,11 @@ func RenderSnapshotHuman(snapshot SystemSnapshot) string {
 		snapshot.Ruleset.PCREHeavyRules,
 		snapshot.Ruleset.RulesFileSizeBytes,
 	)
-	fmt.Fprintf(&b, "Safety: default_route=%s ssh_iface=%s management_iface=%t\n",
+	fmt.Fprintf(&b, "Safety: default_route=%s ssh_iface=%s default_route_iface=%t ssh_iface_match=%t management_iface=%t\n",
 		emptyIf(snapshot.Safety.DefaultRouteIface, "unknown"),
 		emptyIf(snapshot.Safety.SSHIface, "unknown"),
+		snapshot.Safety.IsDefaultRouteIface,
+		snapshot.Safety.IsSSHIface,
 		snapshot.Safety.IsManagementIface,
 	)
 	warnings := dedupeStrings(append(snapshot.Warnings, snapshot.Safety.Warnings...))
@@ -200,6 +205,9 @@ func BuildRecommendations(snapshot SystemSnapshot) []string {
 	}
 	if !snapshot.Build.SupportsAFXDP {
 		recommendations = append(recommendations, "AF_XDP profile is unsupported by current Suricata build or kernel")
+	}
+	if snapshot.Build.SupportsAFXDP && snapshot.NIC.XDPKernelSupported && !snapshot.NIC.AFXDPZeroCopyProven {
+		recommendations = append(recommendations, "verify AF_XDP hardware zero-copy support on the target NIC before relying on zero-copy performance")
 	}
 	if !snapshot.Build.SupportsNFQ {
 		recommendations = append(recommendations, "NFQ profile is unsupported by current Suricata build")

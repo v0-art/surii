@@ -9,11 +9,12 @@ const (
 	ProfileDPDK     CaptureProfile = "dpdk"
 	ProfileAFXDP    CaptureProfile = "af-xdp"
 	ProfileNFQ      CaptureProfile = "nfq"
+	ProfilePCAP     CaptureProfile = "pcap"
 )
 
 func (p CaptureProfile) Valid() bool {
 	switch p {
-	case ProfileAFPacket, ProfileDPDK, ProfileAFXDP, ProfileNFQ:
+	case ProfileAFPacket, ProfileDPDK, ProfileAFXDP, ProfileNFQ, ProfilePCAP:
 		return true
 	default:
 		return false
@@ -81,28 +82,31 @@ type CPUInfo struct {
 }
 
 type NICInfo struct {
-	Iface              string            `json:"iface"`
-	Driver             string            `json:"driver"`
-	PCIAddress         string            `json:"pci_address"`
-	RSSCombinedCurrent int               `json:"rss_combined_current"`
-	RSSCombinedMax     int               `json:"rss_combined_max"`
-	RXQueues           int               `json:"rx_queues"`
-	TXQueues           int               `json:"tx_queues"`
-	SymmetricRSS       bool              `json:"symmetric_rss"`
-	DPDKStatusLine     string            `json:"dpdk_status_line"`
-	DPDKDevbindPresent bool              `json:"dpdk_devbind_present"`
-	DPDKCurrentDriver  string            `json:"dpdk_current_driver"`
-	DPDKUnusedDrivers  []string          `json:"dpdk_unused_drivers"`
-	DPDKCanBindVFIO    bool              `json:"dpdk_can_bind_vfio"`
-	DPDKCanRollback    bool              `json:"dpdk_can_rollback"`
-	DPDKBindReady      bool              `json:"dpdk_bind_ready"`
-	DPDKIOMMUGroup     string            `json:"dpdk_iommu_group"`
-	DPDKIOMMUViable    bool              `json:"dpdk_iommu_viable"`
-	XDPSupportDetected bool              `json:"xdp_support_detected"`
-	NUMANode           int               `json:"numa_node"`
-	Promisc            bool              `json:"promisc"`
-	Offload            map[string]string `json:"offload"`
-	Warnings           []string          `json:"warnings"`
+	Iface                      string            `json:"iface"`
+	Driver                     string            `json:"driver"`
+	PCIAddress                 string            `json:"pci_address"`
+	RSSCombinedCurrent         int               `json:"rss_combined_current"`
+	RSSCombinedMax             int               `json:"rss_combined_max"`
+	RXQueues                   int               `json:"rx_queues"`
+	TXQueues                   int               `json:"tx_queues"`
+	SymmetricRSS               bool              `json:"symmetric_rss"`
+	DPDKStatusLine             string            `json:"dpdk_status_line"`
+	DPDKDevbindPresent         bool              `json:"dpdk_devbind_present"`
+	DPDKCurrentDriver          string            `json:"dpdk_current_driver"`
+	DPDKUnusedDrivers          []string          `json:"dpdk_unused_drivers"`
+	DPDKCanBindVFIO            bool              `json:"dpdk_can_bind_vfio"`
+	DPDKCanRollback            bool              `json:"dpdk_can_rollback"`
+	DPDKBindReady              bool              `json:"dpdk_bind_ready"`
+	DPDKIOMMUGroup             string            `json:"dpdk_iommu_group"`
+	DPDKIOMMUViable            bool              `json:"dpdk_iommu_viable"`
+	XDPKernelSupported         bool              `json:"xdp_kernel_supported"`
+	XDPInterfaceSignalDetected bool              `json:"xdp_interface_signal_detected"`
+	XDPSupportDetected         bool              `json:"xdp_support_detected"`
+	AFXDPZeroCopyProven        bool              `json:"af_xdp_zero_copy_proven"`
+	NUMANode                   int               `json:"numa_node"`
+	Promisc                    bool              `json:"promisc"`
+	Offload                    map[string]string `json:"offload"`
+	Warnings                   []string          `json:"warnings"`
 }
 
 type RulesetInventory struct {
@@ -118,11 +122,13 @@ type RulesetInventory struct {
 }
 
 type SafetyContext struct {
-	DefaultRouteIface string   `json:"default_route_iface"`
-	SSHIface          string   `json:"ssh_iface"`
-	IsManagementIface bool     `json:"is_management_iface"`
-	DetectionMethod   string   `json:"detection_method"`
-	Warnings          []string `json:"warnings"`
+	DefaultRouteIface   string   `json:"default_route_iface"`
+	SSHIface            string   `json:"ssh_iface"`
+	IsDefaultRouteIface bool     `json:"is_default_route_iface"`
+	IsSSHIface          bool     `json:"is_ssh_iface"`
+	IsManagementIface   bool     `json:"is_management_iface"`
+	DetectionMethod     string   `json:"detection_method"`
+	Warnings            []string `json:"warnings"`
 }
 
 type SystemSnapshot struct {

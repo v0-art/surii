@@ -81,6 +81,91 @@ func TestBuildPlan_GuardrailsBlockOSActionsOnManagementIface(t *testing.T) {
 	}
 }
 
+func TestBuildPlan_GuardrailsBlockDefaultRouteManagementIface(t *testing.T) {
+	snapshot := SystemSnapshot{
+		Iface: "ens33",
+		CPU:   CPUInfo{LogicalCores: 4},
+		NIC: NICInfo{
+			RSSCombinedCurrent: 2,
+			RSSCombinedMax:     4,
+		},
+		Safety: SafetyContext{
+			DefaultRouteIface:   "ens33",
+			SSHIface:            "ens37",
+			IsDefaultRouteIface: true,
+			IsManagementIface:   true,
+		},
+	}
+	plan, err := NewPlanner().BuildPlan(snapshot, ProfileAFPacket, ScopeFull, IPSModeIDS, false)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !plan.Blocked {
+		t.Fatalf("expected full plan on default-route management iface to be blocked")
+	}
+	for _, action := range plan.Actions {
+		if isManagementGuardedAction(action) && !action.BlockedByGuardrail {
+			t.Fatalf("expected guarded action %s to be blocked", action.ID)
+		}
+	}
+}
+
+func TestBuildPlan_GuardrailsBlockSSHManagementIface(t *testing.T) {
+	snapshot := SystemSnapshot{
+		Iface: "ens37",
+		CPU:   CPUInfo{LogicalCores: 4},
+		NIC: NICInfo{
+			RSSCombinedCurrent: 2,
+			RSSCombinedMax:     4,
+		},
+		Safety: SafetyContext{
+			DefaultRouteIface: "ens33",
+			SSHIface:          "ens37",
+			IsSSHIface:        true,
+			IsManagementIface: true,
+		},
+	}
+	plan, err := NewPlanner().BuildPlan(snapshot, ProfileAFPacket, ScopeOSTuning, IPSModeIDS, false)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !plan.Blocked {
+		t.Fatalf("expected os-tuning plan on SSH management iface to be blocked")
+	}
+	for _, action := range plan.Actions {
+		if !action.BlockedByGuardrail {
+			t.Fatalf("expected os-tuning action %s to be blocked", action.ID)
+		}
+	}
+}
+
+func TestBuildPlan_GuardrailsAllowWhenNoManagementMatch(t *testing.T) {
+	snapshot := SystemSnapshot{
+		Iface: "ens38",
+		CPU:   CPUInfo{LogicalCores: 4},
+		NIC: NICInfo{
+			RSSCombinedCurrent: 2,
+			RSSCombinedMax:     4,
+		},
+		Safety: SafetyContext{
+			DefaultRouteIface: "ens33",
+			SSHIface:          "ens37",
+		},
+	}
+	plan, err := NewPlanner().BuildPlan(snapshot, ProfileAFPacket, ScopeFull, IPSModeIDS, false)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if plan.Blocked {
+		t.Fatalf("did not expect non-management plan to be blocked: %v", plan.BlockingReasons)
+	}
+	for _, action := range plan.Actions {
+		if action.BlockedByGuardrail {
+			t.Fatalf("did not expect action %s to be guardrail-blocked", action.ID)
+		}
+	}
+}
+
 func TestBuildPlan_GuardrailsPreserveHardBlockReasons(t *testing.T) {
 	snapshot := SystemSnapshot{
 		Iface: "eth0",
@@ -165,6 +250,30 @@ func TestBuildPlan_ForceDisablesGuardrailBlocks(t *testing.T) {
 	}
 	if plan.Blocked {
 		t.Fatalf("expected force=true to bypass blocking")
+	}
+}
+
+func TestBuildPlan_ForceDoesNotBypassHardBlockers(t *testing.T) {
+	snapshot := SystemSnapshot{
+		Iface: "eth0",
+		Build: BuildCapabilities{
+			SupportsDPDK: false,
+		},
+		Safety: SafetyContext{
+			IsManagementIface: true,
+		},
+	}
+	plan, err := NewPlanner().BuildPlan(snapshot, ProfileDPDK, ScopeFull, IPSModeStrict, true)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !plan.Blocked || !plan.HardBlocked {
+		t.Fatalf("expected force=true to preserve hard blockers, blocked=%t hard=%t reasons=%v", plan.Blocked, plan.HardBlocked, plan.BlockingReasons)
+	}
+	for _, action := range plan.Actions {
+		if action.BlockedByGuardrail {
+			t.Fatalf("did not expect guardrail blockers with force=true: %+v", action)
+		}
 	}
 }
 
@@ -529,6 +638,53 @@ func TestBuildPlan_ConfigOnlyDoesNotIncludeSystemdProfileAction(t *testing.T) {
 	}
 }
 
+func TestBuildPlan_PCAPConfigOnlyContainsOnlyYAML(t *testing.T) {
+	snapshot := SystemSnapshot{
+		Iface: "ens37",
+		Safety: SafetyContext{
+			IsManagementIface: false,
+		},
+	}
+	plan, err := NewPlanner().BuildPlan(snapshot, ProfilePCAP, ScopeConfigOnly, IPSModeIDS, false)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if plan.Blocked || plan.HardBlocked {
+		t.Fatalf("did not expect PCAP config-only blockers: %v", plan.BlockingReasons)
+	}
+	if len(plan.Actions) != 1 || plan.Actions[0].ID != "yaml-tuning" {
+		t.Fatalf("expected only YAML action for PCAP config-only, got %+v", plan.Actions)
+	}
+	if got := plan.Actions[0].Metadata["runmode"]; got != "autofp" {
+		t.Fatalf("expected PCAP runmode metadata autofp, got %v", got)
+	}
+}
+
+func TestBuildPlan_PCAPFullIncludesSystemdProfileAction(t *testing.T) {
+	snapshot := SystemSnapshot{
+		Iface:      "ens37",
+		ConfigPath: "/etc/suricata/suricata.yaml",
+		CPU:        CPUInfo{LogicalCores: 4},
+		NIC: NICInfo{
+			RSSCombinedCurrent: 2,
+			RSSCombinedMax:     4,
+		},
+		Safety: SafetyContext{
+			IsManagementIface: false,
+		},
+	}
+	plan, err := NewPlanner().BuildPlan(snapshot, ProfilePCAP, ScopeFull, IPSModeIDS, false)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if plan.Blocked || plan.HardBlocked {
+		t.Fatalf("did not expect PCAP full capability blockers: %v", plan.BlockingReasons)
+	}
+	if !containsAction(plan.Actions, "yaml-tuning") || !containsAction(plan.Actions, "systemd-profile") {
+		t.Fatalf("expected PCAP full plan to include YAML and systemd-profile actions, got %+v", plan.Actions)
+	}
+}
+
 func TestBuildPlan_AFXDPFullDoesNotIncludeNoopQueueAction(t *testing.T) {
 	snapshot := SystemSnapshot{
 		Iface: "ens33",
@@ -536,7 +692,10 @@ func TestBuildPlan_AFXDPFullDoesNotIncludeNoopQueueAction(t *testing.T) {
 			SupportsAFXDP: true,
 		},
 		NIC: NICInfo{
-			XDPSupportDetected: true,
+			XDPKernelSupported:         true,
+			XDPInterfaceSignalDetected: true,
+			XDPSupportDetected:         true,
+			AFXDPZeroCopyProven:        false,
 		},
 		Safety: SafetyContext{
 			IsManagementIface: false,
@@ -554,6 +713,72 @@ func TestBuildPlan_AFXDPFullDoesNotIncludeNoopQueueAction(t *testing.T) {
 	if !containsAction(plan.Actions, "af-xdp-hugepages") {
 		t.Fatalf("expected af-xdp hugepages action")
 	}
+	if !containsAction(plan.Actions, "af-xdp-interface-warning") {
+		t.Fatalf("expected af-xdp critical warning action")
+	}
+}
+
+func TestBuildPlan_AFXDPConfigOnlyAllowsKernelOnlyPreflight(t *testing.T) {
+	snapshot := SystemSnapshot{
+		Iface: "ens33",
+		Build: BuildCapabilities{
+			SupportsAFXDP: true,
+		},
+		NIC: NICInfo{
+			XDPKernelSupported: true,
+		},
+	}
+	plan, err := NewPlanner().BuildPlan(snapshot, ProfileAFXDP, ScopeConfigOnly, IPSModeIDS, false)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if plan.Blocked || plan.HardBlocked {
+		t.Fatalf("did not expect AF_XDP config-only kernel-only preflight to block: %v", plan.BlockingReasons)
+	}
+}
+
+func TestBuildPlan_AFXDPFullBlocksWithoutInterfaceSignal(t *testing.T) {
+	snapshot := SystemSnapshot{
+		Iface: "ens33",
+		Build: BuildCapabilities{
+			SupportsAFXDP: true,
+		},
+		NIC: NICInfo{
+			XDPKernelSupported: true,
+		},
+	}
+	plan, err := NewPlanner().BuildPlan(snapshot, ProfileAFXDP, ScopeFull, IPSModeIDS, true)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !plan.Blocked || !plan.HardBlocked {
+		t.Fatalf("expected AF_XDP full without interface signal to hard-block")
+	}
+	if !strings.Contains(strings.Join(plan.BlockingReasons, "\n"), "interface XDP support signal") {
+		t.Fatalf("expected interface signal blocking reason, got %v", plan.BlockingReasons)
+	}
+}
+
+func TestBuildPlan_AFXDPBlocksOldKernel(t *testing.T) {
+	snapshot := SystemSnapshot{
+		Iface: "ens33",
+		Build: BuildCapabilities{
+			SupportsAFXDP: true,
+		},
+		NIC: NICInfo{
+			XDPInterfaceSignalDetected: true,
+		},
+	}
+	plan, err := NewPlanner().BuildPlan(snapshot, ProfileAFXDP, ScopeConfigOnly, IPSModeIDS, true)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !plan.Blocked || !plan.HardBlocked {
+		t.Fatalf("expected AF_XDP old/unknown kernel preflight to hard-block")
+	}
+	if !strings.Contains(strings.Join(plan.BlockingReasons, "\n"), "kernel") {
+		t.Fatalf("expected kernel blocking reason, got %v", plan.BlockingReasons)
+	}
 }
 
 func TestBuildSuricataExecStart_QuotesSystemdArguments(t *testing.T) {
@@ -565,6 +790,22 @@ func TestBuildSuricataExecStart_QuotesSystemdArguments(t *testing.T) {
 		t.Fatalf("expected quoted af-packet argument, got: %s", execStart)
 	}
 	if !strings.Contains(execStart, `"/tmp/suricata configs/suricata.yaml"`) {
+		t.Fatalf("expected quoted config path, got: %s", execStart)
+	}
+	if strings.Contains(execStart, "\n") {
+		t.Fatalf("did not expect multiline ExecStart: %q", execStart)
+	}
+}
+
+func TestBuildSuricataExecStart_PCAPQuotesSystemdArguments(t *testing.T) {
+	execStart := buildSuricataExecStart(SystemSnapshot{
+		Iface:      "capture 0",
+		ConfigPath: "/tmp/suricata configs/suricata.yaml",
+	}, ProfilePCAP)
+	if !strings.Contains(execStart, `-i "capture 0"`) {
+		t.Fatalf("expected quoted pcap interface argument, got: %s", execStart)
+	}
+	if !strings.Contains(execStart, `-c "/tmp/suricata configs/suricata.yaml"`) {
 		t.Fatalf("expected quoted config path, got: %s", execStart)
 	}
 	if strings.Contains(execStart, "\n") {

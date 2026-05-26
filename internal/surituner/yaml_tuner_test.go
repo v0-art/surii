@@ -252,6 +252,29 @@ func TestApplyTuneMap_ConfiguresDPDKInterfaceFromPCIAddress(t *testing.T) {
 	}
 }
 
+func TestApplyTuneMap_ConfiguresPCAPAutofpAndInterface(t *testing.T) {
+	cfg := map[string]interface{}{}
+	_ = applyTuneMap(cfg, TuneOptions{
+		Profile:       ProfilePCAP,
+		IPSMode:       IPSModeIDS,
+		Iface:         "ens37",
+		SupportsHWLOC: true,
+		EnabledRules:  100,
+		TotalRAMMB:    1024,
+	})
+
+	if got := cfg["runmode"]; got != "autofp" {
+		t.Fatalf("expected PCAP runmode autofp, got %v", got)
+	}
+	pcapEntries, ok := cfg["pcap"].([]map[string]interface{})
+	if !ok || len(pcapEntries) == 0 {
+		t.Fatalf("expected pcap interface list")
+	}
+	if got := pcapEntries[0]["interface"]; got != "ens37" {
+		t.Fatalf("expected pcap interface ens37, got %v", got)
+	}
+}
+
 func TestApplyTuneMap_ConfiguresExceptionPoliciesByIPSMode(t *testing.T) {
 	tests := []struct {
 		name            string

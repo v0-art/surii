@@ -417,6 +417,51 @@ func TestCollectRulesetWarnsWhenSuricataUpdateSourcesFail(t *testing.T) {
 	}
 }
 
+func TestCollectSafetyMarksDefaultRouteIfaceAsManagement(t *testing.T) {
+	t.Setenv("SSH_CONNECTION", "198.51.100.10 55555 192.0.2.10 22")
+	c := NewCollector(collectorRunner{
+		results: map[string]CommandResult{
+			"ip route show default":      {Stdout: "default via 192.0.2.1 dev ens33 proto dhcp"},
+			"ip route get 198.51.100.10": {Stdout: "198.51.100.10 dev ens37 src 192.0.2.10"},
+		},
+	})
+	safety := c.collectSafety("ens33")
+	if !safety.IsDefaultRouteIface || safety.IsSSHIface || !safety.IsManagementIface {
+		t.Fatalf("expected default route iface to be management risk, got %+v", safety)
+	}
+	if safety.DefaultRouteIface != "ens33" || safety.SSHIface != "ens37" {
+		t.Fatalf("unexpected safety interfaces: %+v", safety)
+	}
+}
+
+func TestCollectSafetyMarksSSHIfaceAsManagement(t *testing.T) {
+	t.Setenv("SSH_CONNECTION", "198.51.100.10 55555 192.0.2.10 22")
+	c := NewCollector(collectorRunner{
+		results: map[string]CommandResult{
+			"ip route show default":      {Stdout: "default via 192.0.2.1 dev ens33 proto dhcp"},
+			"ip route get 198.51.100.10": {Stdout: "198.51.100.10 dev ens37 src 192.0.2.10"},
+		},
+	})
+	safety := c.collectSafety("ens37")
+	if safety.IsDefaultRouteIface || !safety.IsSSHIface || !safety.IsManagementIface {
+		t.Fatalf("expected SSH iface to be management risk, got %+v", safety)
+	}
+}
+
+func TestCollectSafetyLeavesUnmatchedIfaceNonManagement(t *testing.T) {
+	t.Setenv("SSH_CONNECTION", "198.51.100.10 55555 192.0.2.10 22")
+	c := NewCollector(collectorRunner{
+		results: map[string]CommandResult{
+			"ip route show default":      {Stdout: "default via 192.0.2.1 dev ens33 proto dhcp"},
+			"ip route get 198.51.100.10": {Stdout: "198.51.100.10 dev ens37 src 192.0.2.10"},
+		},
+	})
+	safety := c.collectSafety("ens38")
+	if safety.IsDefaultRouteIface || safety.IsSSHIface || safety.IsManagementIface {
+		t.Fatalf("did not expect unmatched iface to be management risk, got %+v", safety)
+	}
+}
+
 func TestLinkDetailsIndicateXDPSupport(t *testing.T) {
 	if !linkDetailsIndicateXDPSupport("2: eth0: <BROADCAST> mtu 1500\n    prog/xdp id 42 tag abc") {
 		t.Fatalf("expected prog/xdp to indicate XDP support")
@@ -483,7 +528,7 @@ func TestKernelSupportsAFXDP(t *testing.T) {
 	}
 }
 
-func TestDetectXDPSupportInfersFromKernelRelease(t *testing.T) {
+func TestDetectXDPPreflightSeparatesKernelInferenceFromInterfaceSignal(t *testing.T) {
 	if _, err := os.Stat("/sys/class/net/lo"); err != nil {
 		t.Skip("loopback interface is not present in sysfs")
 	}
@@ -494,11 +539,38 @@ func TestDetectXDPSupportInfersFromKernelRelease(t *testing.T) {
 		},
 	})
 	var warnings []string
-	if !c.detectXDPSupport("lo", &warnings) {
-		t.Fatalf("expected AF_XDP support inferred from kernel release, warnings=%v", warnings)
+	got := c.detectXDPPreflight("lo", &warnings)
+	if !got.KernelSupported {
+		t.Fatalf("expected AF_XDP kernel support from release, got %+v warnings=%v", got, warnings)
 	}
-	if !strings.Contains(strings.Join(warnings, "\n"), "inferred from kernel release") {
-		t.Fatalf("expected inference warning, got %v", warnings)
+	if got.InterfaceSignalDetected {
+		t.Fatalf("did not expect interface XDP signal from plain ip output, got %+v", got)
+	}
+	if got.SupportDetected {
+		t.Fatalf("did not expect full XDP support detected from kernel only, got %+v", got)
+	}
+	if !strings.Contains(strings.Join(warnings, "\n"), "interface-specific XDP signal was not detected") {
+		t.Fatalf("expected missing interface signal warning, got %v", warnings)
+	}
+	if !strings.Contains(strings.Join(warnings, "\n"), "zero-copy support was not verified") {
+		t.Fatalf("expected zero-copy warning, got %v", warnings)
+	}
+}
+
+func TestDetectXDPPreflightDetectsInterfaceSignal(t *testing.T) {
+	if _, err := os.Stat("/sys/class/net/lo"); err != nil {
+		t.Skip("loopback interface is not present in sysfs")
+	}
+	c := NewCollector(collectorRunner{
+		results: map[string]CommandResult{
+			"ip -details link show lo": {Stdout: "1: lo: <LOOPBACK,UP> mtu 65536\n    prog/xdp id 42 tag abc"},
+			"uname -r":                 {Stdout: "6.8.12-test"},
+		},
+	})
+	var warnings []string
+	got := c.detectXDPPreflight("lo", &warnings)
+	if !got.KernelSupported || !got.InterfaceSignalDetected || !got.SupportDetected {
+		t.Fatalf("expected kernel and interface XDP support, got %+v warnings=%v", got, warnings)
 	}
 }
 
@@ -513,8 +585,9 @@ func TestDetectXDPSupportRejectsOldKernel(t *testing.T) {
 		},
 	})
 	var warnings []string
-	if c.detectXDPSupport("lo", &warnings) {
-		t.Fatalf("did not expect AF_XDP support for old kernel")
+	got := c.detectXDPPreflight("lo", &warnings)
+	if got.KernelSupported || got.SupportDetected {
+		t.Fatalf("did not expect AF_XDP kernel support for old kernel, got %+v", got)
 	}
 	if !strings.Contains(strings.Join(warnings, "\n"), "kernel >= 4.18") {
 		t.Fatalf("expected kernel requirement warning, got %v", warnings)

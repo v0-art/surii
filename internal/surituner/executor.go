@@ -217,14 +217,7 @@ func (e *Executor) Apply(plan Plan, opts ApplyOptions) (ApplyResult, error) {
 				warnings = append(warnings, preparedYAMLChanges...)
 			}
 		case "warning":
-			record := CommandRecord{
-				Index:    idx,
-				ActionID: action.ID,
-				Command:  []string{action.ApplyCmd},
-				Status:   "ok",
-			}
-			state.Applied = append(state.Applied, record)
-			appliedActions[action.ID] = action
+			warnings = append(warnings, fmt.Sprintf("%s: %s", action.ID, action.Summary))
 		case "node-hugepages":
 			err := applyNodeHugepagesFromAction(action)
 			record := CommandRecord{

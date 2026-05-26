@@ -2,6 +2,7 @@ package surituner
 
 import (
 	"bytes"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -31,6 +32,30 @@ func TestResolveApplyScope(t *testing.T) {
 	}
 }
 
+func TestParseProfileAcceptsPCAP(t *testing.T) {
+	profile, err := parseProfile("pcap")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if profile != ProfilePCAP {
+		t.Fatalf("expected pcap profile, got %s", profile)
+	}
+	if !ProfilePCAP.Valid() {
+		t.Fatalf("expected ProfilePCAP to be valid")
+	}
+}
+
+func TestRootHelpListsPCAPProfile(t *testing.T) {
+	var out bytes.Buffer
+	code := RunCLI([]string{"--help"}, strings.NewReader(""), &out, io.Discard)
+	if code != 0 {
+		t.Fatalf("expected help exit code 0, got %d", code)
+	}
+	if !strings.Contains(out.String(), "pcap") {
+		t.Fatalf("expected help to list pcap profile, got:\n%s", out.String())
+	}
+}
+
 func TestResolveIPSMode(t *testing.T) {
 	mode, err := resolveIPSMode("", ProfileNFQ)
 	if err != nil {
@@ -46,6 +71,14 @@ func TestResolveIPSMode(t *testing.T) {
 	}
 	if mode != IPSModeIDS {
 		t.Fatalf("expected ids default, got %s", mode)
+	}
+
+	mode, err = resolveIPSMode("", ProfilePCAP)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if mode != IPSModeIDS {
+		t.Fatalf("expected ids default for pcap, got %s", mode)
 	}
 
 	_, err = resolveIPSMode("unsupported", ProfileAFPacket)
@@ -126,6 +159,41 @@ func TestRunCLIApplyDefaultConfigOnlyDoesNotRunOSTuning(t *testing.T) {
 	} {
 		if strings.Contains(log, forbidden) {
 			t.Fatalf("did not expect OS/NIC tuning command %q in default config-only apply, log:\n%s", forbidden, log)
+		}
+	}
+}
+
+func TestRunCLIApplyPCAPConfigOnlyDoesNotRunOSTuning(t *testing.T) {
+	orig := getEUID
+	defer func() { getEUID = orig }()
+	getEUID = func() int { return 0 }
+
+	dir, configPath, logPath := setupFakeCLIHost(t)
+	var out bytes.Buffer
+	var errOut bytes.Buffer
+	code := RunCLI([]string{
+		"apply",
+		"--profile", "pcap",
+		"--iface", "lo",
+		"--config-path", configPath,
+		"--state-dir", filepath.Join(dir, "state"),
+		"--yes",
+	}, strings.NewReader(""), &out, &errOut)
+	if code != 0 {
+		t.Fatalf("expected PCAP config-only apply success, code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+	log := readCommandLog(t, logPath)
+	if !strings.Contains(log, "suricata -T -c") {
+		t.Fatalf("expected config validation in PCAP config-only apply, log:\n%s", log)
+	}
+	for _, forbidden := range []string{
+		"ethtool -K",
+		"ethtool -G",
+		"sysctl -w net.core",
+		"ip link set dev lo promisc on",
+	} {
+		if strings.Contains(log, forbidden) {
+			t.Fatalf("did not expect OS/NIC tuning command %q in PCAP config-only apply, log:\n%s", forbidden, log)
 		}
 	}
 }

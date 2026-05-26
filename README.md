@@ -18,7 +18,7 @@ What is covered locally:
 - Management-interface guardrails for OS/NIC/firewall/capture-driver actions unless `--force`.
 - YAML tuning for runmode, hwloc autopin, CPU affinity fallback, memcaps, max-pending-packets, exception policies, and `run-as` hardening.
 - OS/NIC tuning actions for GRO/LRO, ring buffers, RSS combined queues, IRQ affinity, sysctl buffers, promiscuous mode.
-- Capture profile logic for AF_PACKET, DPDK, AF_XDP, and NFQ.
+- Capture profile logic for AF_PACKET, DPDK, AF_XDP, NFQ, and PCAP.
 - Transactional apply: root check, state file before live changes, YAML backup, temporary YAML, `suricata -T`, live write after validation, systemd restart/status check, auto-rollback.
 - State and rollback model under `/var/lib/surituner/state`.
 - Human and JSON report output.
@@ -88,6 +88,7 @@ Supported capture profiles:
 - `dpdk`
 - `af-xdp`
 - `nfq`
+- `pcap`
 
 Examples:
 
@@ -96,6 +97,7 @@ Examples:
 ./surituner plan --profile dpdk --iface ens5f0 --scope full
 ./surituner plan --profile af-xdp --iface ens5f0 --scope full
 ./surituner plan --profile nfq --iface eth0 --scope full --ips-mode strict
+./surituner plan --profile pcap --iface eth0 --scope full
 ```
 
 ### Apply Scopes
@@ -128,7 +130,7 @@ sudo ./surituner apply --profile af-packet --iface eth0 --full --yes
 
 ### IPS Modes
 
-Supported IPS modes:
+Supported IPS modes use Suricata-valid exception-policy names while preserving the v1 intent:
 
 - `strict`: fail-close behavior. YAML uses `exception-policy: drop-flow`; NFQ uses `fail-open: false`.
 - `availability`: fail-open behavior. YAML uses `exception-policy: pass-flow`; NFQ uses `fail-open: true`.
@@ -137,7 +139,7 @@ Supported IPS modes:
 Defaults:
 
 - NFQ defaults to `strict`.
-- Other profiles default to `ids`.
+- Other profiles, including PCAP, default to `ids`.
 
 ### Detect
 
@@ -148,7 +150,7 @@ Defaults:
 - CPU and NUMA topology.
 - NIC driver, PCI address, queues, RSS channel data, RSS symmetry signal, NUMA node, offload flags, promisc state.
 - DPDK preflight: `dpdk-devbind.py`, PCI status line, current driver, vfio-pci availability, rollback driver, IOMMU group.
-- AF_XDP preflight: interface presence, `ip -details` XDP signals, kernel release fallback.
+- AF_XDP preflight: interface presence, kernel >= 4.18, interface-specific XDP signal from `ip -details`, and an explicit note that hardware zero-copy is not proven by the generic probe.
 - Ruleset inventory: `suricata-update`, total/enabled rules, PCRE-heavy rules, rule sources, rules file size, update timestamp.
 - Safety guardrails: default route interface and SSH management interface best-effort via `SSH_CONNECTION`, `ss`, and routing table.
 
@@ -265,7 +267,7 @@ SuriTuner detects the management interface best-effort from:
 - `ss -tnp`;
 - `ip route get <remote-ip>`.
 
-On the management interface, risky OS/NIC/firewall/capture-driver actions are blocked unless `--force` is explicitly provided.
+An interface is treated as management-risk when it matches either the SSH management interface or the default route interface. On the management interface, risky OS/NIC/firewall/capture-driver actions are blocked unless `--force` is explicitly provided.
 
 Config-only YAML changes remain allowed.
 
@@ -347,9 +349,11 @@ In this VM, `ens37` is safe as a non-management test NIC, but DPDK full remains 
 ### AF_XDP
 
 - Requires Suricata AF_XDP build support.
-- Checks interface presence, XDP link details, and kernel release.
+- Config-only requires Suricata AF_XDP build support and kernel support.
+- Full mode requires kernel support plus an interface-specific XDP signal; kernel version alone is not treated as full AF_XDP readiness.
 - Emits an explicit CRITICAL warning that AF_XDP may reduce or remove standard network use of the interface.
 - Uses HugePages for unaligned chunks in full mode.
+- Reports that hardware zero-copy support is not verified unless proven by hardware/tooling outside the generic preflight.
 
 ### NFQ
 
@@ -358,6 +362,14 @@ In this VM, `ens37` is safe as a non-management test NIC, but DPDK full remains 
 - YAML runmode: `autofp`.
 - Adds an NFQUEUE rule for queue `0`.
 - `nftables` rules are tagged with a SuriTuner comment and verified after insert.
+
+### PCAP
+
+- Does not require DPDK, AF_XDP, or NFQ Suricata build capabilities.
+- YAML runmode: `autofp`.
+- YAML configures a `pcap` interface entry for the target interface.
+- Config-only applies YAML only.
+- Full mode includes YAML, normal OS/NIC tuning, and a systemd profile using Suricata live PCAP capture with `-i <iface>`.
 
 ## Developer Guide
 
@@ -416,6 +428,22 @@ golangci-lint run ./...
 
 Last local verification in this workspace:
 
+- 2026-05-26 v1 completion checks:
+  - `/home/vol/.local/go/bin/go test ./...`: PASS.
+  - `CGO_ENABLED=1 CC="/home/vol/.local/zig/current/zig cc" CXX="/home/vol/.local/zig/current/zig c++" /home/vol/.local/go/bin/go test -race ./...`: PASS. Plain `go test -race` without cgo/toolchain env fails in this VM because `gcc` is not installed.
+  - `/home/vol/.local/go/bin/go vet ./...`: PASS.
+  - `/home/vol/.local/go/bin/gofmt -l .`: PASS, empty output.
+  - `/home/vol/.local/go/bin/go build -o surituner ./cmd/surituner`: PASS.
+  - `/home/vol/.local/go/bin/go mod verify`: PASS.
+  - `bash -n scripts/*.sh`: PASS.
+  - `golangci-lint`: not run because the binary is not installed.
+- PCAP JSON checks on `ens37`: config-only and full plans parse with `jq empty`; config-only has only `yaml-tuning`; full includes YAML, OS/NIC actions, and `systemd-profile` with `-i ens37`.
+- Management guardrail check: `af-packet --iface ens33 --scope full` is blocked on management interface, including OS/NIC actions and `systemd-profile`.
+- DPDK `ens37` full remains hard-blocked by missing IOMMU group/readiness in this VM.
+- `detect --iface ens37 --json` and `report --iface ens37 --json` parse with `jq empty`.
+- Non-root `apply --profile pcap --iface ens37 --config-only --yes` refuses before planning with `this command requires root privileges`.
+- Real safe PCAP config-only apply and rollback on `ens37`: `/var/lib/surituner/state/20260526T151125.997723793Z.json`, final status `rolled_back`, all rollback records `ok`; `suricata.service` remained `active` and `suricata -T -c /etc/suricata/suricata.yaml` passes after rollback.
+- AF_XDP `ens37` full is now hard-blocked because this VM shows kernel support but no interface-specific XDP signal; hardware zero-copy remains hardware-verification only.
 - `go version`: not available in `PATH`.
 - `/home/vol/.local/go/bin/go version`: `go1.26.3 linux/amd64`.
 - `make`: not installed in this VM; final continuation checks were run with direct Go commands.
@@ -483,10 +511,13 @@ Tests currently cover:
 
 - CLI scope resolution and root checks.
 - Default config-only apply separation from OS/NIC tuning.
+- PCAP profile parsing, help text, config-only/full planning, YAML `pcap` section tuning, systemd `-i <iface>` startup, and config-only apply separation from OS/NIC tuning.
 - OS-tuning separation from YAML validation/restart.
 - Rollback `--state latest --yes`.
 - Planner guardrails and `--force`.
+- Management-risk detection for SSH interface or default route interface.
 - Capability blockers for DPDK, AF_XDP, NFQ.
+- AF_XDP split kernel/interface preflight and full-mode hard-blocking when interface XDP signal is absent.
 - Scope-aware capability guards for config-only, os-tuning, and full plans.
 - Preservation of hard-block reasons when management-interface guardrails are also present.
 - NFQ iptables/nftables behavior.
@@ -494,6 +525,7 @@ Tests currently cover:
 - State save/load/latest, permissions, and path confinement.
 - Executor transaction ordering, YAML validation before write, backup before live write, pre-state validation before OS/NIC commands.
 - Reverse-order rollback.
+- Warning actions remaining in plans/state while not being counted as applied live actions.
 - Refusal to execute unsupported rollback commands from state.
 - JSON output validity and nil-slice normalization.
 - Trusted root command lookup.

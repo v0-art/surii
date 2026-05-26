@@ -40,6 +40,13 @@ type dpdkPreflightResult struct {
 	IOMMUViable     bool
 }
 
+type xdpPreflightResult struct {
+	KernelSupported         bool
+	InterfaceSignalDetected bool
+	SupportDetected         bool
+	ZeroCopyProven          bool
+}
+
 var vfioPCIAvailabilityPaths = []string{
 	"/sys/module/vfio_pci",
 	"/sys/bus/pci/drivers/vfio-pci",
@@ -284,7 +291,11 @@ func (c *Collector) collectNICInfo(iface string) NICInfo {
 	nic.DPDKBindReady = dpdkPreflight.BindReady
 	nic.DPDKIOMMUGroup = dpdkPreflight.IOMMUGroup
 	nic.DPDKIOMMUViable = dpdkPreflight.IOMMUViable
-	nic.XDPSupportDetected = c.detectXDPSupport(iface, &nic.Warnings)
+	xdpPreflight := c.detectXDPPreflight(iface, &nic.Warnings)
+	nic.XDPKernelSupported = xdpPreflight.KernelSupported
+	nic.XDPInterfaceSignalDetected = xdpPreflight.InterfaceSignalDetected
+	nic.XDPSupportDetected = xdpPreflight.SupportDetected
+	nic.AFXDPZeroCopyProven = xdpPreflight.ZeroCopyProven
 
 	res, err := c.Runner.Run([]string{"ip", "-o", "link", "show", iface}, 5*time.Second, true)
 	if err == nil && strings.Contains(res.Stdout, "PROMISC") {
@@ -326,15 +337,20 @@ func rssOutputIndicatesSymmetricHash(raw string) bool {
 }
 
 func (c *Collector) detectXDPSupport(iface string, warnings *[]string) bool {
+	return c.detectXDPPreflight(iface, warnings).SupportDetected
+}
+
+func (c *Collector) detectXDPPreflight(iface string, warnings *[]string) xdpPreflightResult {
+	result := xdpPreflightResult{}
 	if _, err := os.Stat(filepath.Join("/sys/class/net", iface)); err != nil {
 		*warnings = append(*warnings, fmt.Sprintf("interface %s is not present in sysfs for XDP preflight", iface))
-		return false
+		return result
 	}
 	res, err := c.Runner.Run([]string{"ip", "-details", "link", "show", iface}, 5*time.Second, true)
 	if err == nil && res.Stdout != "" {
 		lower := strings.ToLower(res.Stdout)
 		if linkDetailsIndicateXDPSupport(lower) {
-			return true
+			result.InterfaceSignalDetected = true
 		}
 	} else {
 		*warnings = append(*warnings, "unable to probe XDP support with ip -details link show")
@@ -342,15 +358,21 @@ func (c *Collector) detectXDPSupport(iface string, warnings *[]string) bool {
 
 	kernelRelease := c.collectKernelRelease()
 	if kernelSupportsAFXDP(kernelRelease) {
-		*warnings = append(*warnings, fmt.Sprintf("AF_XDP support inferred from kernel release %s; driver-specific zero-copy support was not proven", kernelRelease))
-		return true
+		result.KernelSupported = true
+		if !result.InterfaceSignalDetected {
+			*warnings = append(*warnings, fmt.Sprintf("AF_XDP kernel support detected from release %s, but interface-specific XDP signal was not detected", kernelRelease))
+		}
+		*warnings = append(*warnings, "AF_XDP zero-copy support was not verified; hardware validation is required for zero-copy mode")
+		result.SupportDetected = result.KernelSupported && result.InterfaceSignalDetected
+		return result
 	}
 	if strings.TrimSpace(kernelRelease) == "" {
 		*warnings = append(*warnings, "AF_XDP kernel support could not be determined")
 	} else {
 		*warnings = append(*warnings, fmt.Sprintf("AF_XDP requires Linux kernel >= 4.18; detected %s", kernelRelease))
 	}
-	return false
+	result.SupportDetected = result.KernelSupported && result.InterfaceSignalDetected
+	return result
 }
 
 func (c *Collector) collectKernelRelease() string {
@@ -955,7 +977,9 @@ func (c *Collector) collectSafety(iface string) SafetyContext {
 		safety.SSHIface = safety.DefaultRouteIface
 		safety.Warnings = append(safety.Warnings, "ssh interface not confidently detected, fallback to default route interface")
 	}
-	safety.IsManagementIface = safety.SSHIface != "" && safety.SSHIface == iface
+	safety.IsSSHIface = safety.SSHIface != "" && safety.SSHIface == iface
+	safety.IsDefaultRouteIface = safety.DefaultRouteIface != "" && safety.DefaultRouteIface == iface
+	safety.IsManagementIface = safety.IsSSHIface || safety.IsDefaultRouteIface
 	return safety
 }
 

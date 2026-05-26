@@ -916,6 +916,61 @@ func TestApply_NFQInsertsMissingIptablesRule(t *testing.T) {
 	}
 }
 
+func TestApply_WarningActionIsNotRecordedAsApplied(t *testing.T) {
+	orig := getEUID
+	defer func() { getEUID = orig }()
+	getEUID = func() int { return 0 }
+
+	dir := t.TempDir()
+	ex := NewExecutor(&mockRunner{}, filepath.Join(dir, "state"))
+	plan := Plan{
+		Profile: ProfileAFXDP,
+		Scope:   ScopeFull,
+		IPSMode: IPSModeIDS,
+		Snapshot: SystemSnapshot{
+			Iface: "eth0",
+		},
+		Actions: []PlanAction{
+			{
+				ID:        "af-xdp-interface-warning",
+				Summary:   "AF_XDP may reduce standard network use",
+				Kind:      "warning",
+				RiskLevel: RiskCritical,
+			},
+		},
+	}
+	result, err := ex.Apply(plan, ApplyOptions{
+		AssumeYes: true,
+		Input:     strings.NewReader(""),
+		Output:    io.Discard,
+	})
+	if err != nil {
+		t.Fatalf("apply failed: %v", err)
+	}
+	if result.AppliedCount != 0 {
+		t.Fatalf("expected warning not to increment applied count, got %d", result.AppliedCount)
+	}
+	if !strings.Contains(strings.Join(result.Warnings, "\n"), "af-xdp-interface-warning") {
+		t.Fatalf("expected warning in apply result, got %v", result.Warnings)
+	}
+	state, err := ex.StateStore.Load(result.StatePath)
+	if err != nil {
+		t.Fatalf("load state: %v", err)
+	}
+	if len(state.Applied) != 0 {
+		t.Fatalf("expected no applied command records for warning, got %+v", state.Applied)
+	}
+	if len(state.PlanActions) != 1 || state.PlanActions[0].ID != "af-xdp-interface-warning" {
+		t.Fatalf("expected warning to remain in plan actions, got %+v", state.PlanActions)
+	}
+	records := ex.rollbackApplied(state, map[string]PlanAction{
+		"af-xdp-interface-warning": plan.Actions[0],
+	})
+	if len(records) != 0 {
+		t.Fatalf("did not expect warning rollback records, got %+v", records)
+	}
+}
+
 func TestRollbackApplied_NFQSkipsDeleteWhenIptablesRuleAbsent(t *testing.T) {
 	r := &scriptedRunner{
 		results: map[string]CommandResult{
