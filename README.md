@@ -346,6 +346,8 @@ The expected ready shape is:
 
 In this VM, `ens37` is safe as a non-management test NIC, but DPDK full remains correctly hard-blocked because `0000:02:05.0` has no IOMMU group.
 
+An unsafe no-IOMMU DPDK lab can prove that DPDK itself can bind and open the VM NIC, but it does not satisfy the production full-apply safety requirement. SuriTuner intentionally keeps full DPDK hard-blocked without an IOMMU group because VFIO no-IOMMU removes DMA isolation and is not acceptable for the normal safe apply path.
+
 ### AF_XDP
 
 - Requires Suricata AF_XDP build support.
@@ -373,6 +375,11 @@ In this VM, `ens37` is safe as a non-management test NIC, but DPDK full remains 
 
 ## Developer Guide
 
+Additional readiness and operations docs:
+
+- [Production Readiness](docs/PRODUCTION_READINESS.md)
+- [Operator Runbook](docs/OPERATOR_RUNBOOK.md)
+
 ### Project Layout
 
 ```text
@@ -388,6 +395,7 @@ internal/surituner/reporter.go     human/JSON output and recommendations
 internal/surituner/runner.go       command runner and trusted executable lookup
 internal/surituner/validation.go   CLI input validation
 scripts/ci.sh                      local CI checks
+scripts/production_acceptance.sh   target-host production readiness gate
 scripts/e2e_real_smoke.sh          real-host smoke test
 scripts/install_suricata.sh        Debian/Ubuntu Suricata setup helper
 scripts/check_dpdk_prereqs.sh      safe DPDK tooling/preflight helper, no bind/unbind
@@ -440,6 +448,13 @@ Last local verification in this workspace:
 - PCAP JSON checks on `ens37`: config-only and full plans parse with `jq empty`; config-only has only `yaml-tuning`; full includes YAML, OS/NIC actions, and `systemd-profile` with `-i ens37`.
 - Management guardrail check: `af-packet --iface ens33 --scope full` is blocked on management interface, including OS/NIC actions and `systemd-profile`.
 - DPDK `ens37` full remains hard-blocked by missing IOMMU group/readiness in this VM.
+- Unsafe no-IOMMU DPDK lab on non-management `ens37`:
+  - Installed `dpdk-dev`, `meson`, `ninja-build`, `pkg-config`, `libpcap-dev`, and `libnuma-dev`; no system-wide `apt upgrade` was run.
+  - `vfio` no-IOMMU mode was enabled temporarily, `ens37`/`0000:02:05.0` was bound to `vfio-pci`, and HugePages were set up with `dpdk-hugepages.py --setup 1G`.
+  - `dpdk-testpmd` with `--iova-mode=pa` opened Port 0 through VFIO No-IOMMU using PMD `net_e1000_em`; `--iova-mode=va` failed because this PMD expected PA IOVA mode.
+  - `dpdk-pdump` attached as a secondary process and wrote `/tmp/capture2-pa.pcap` (header-only because `ens37` had `NO-CARRIER` and no packets).
+  - Cleanup restored `ens37` to kernel driver `e1000`, cleared HugePages back to zero, disabled/unloaded temporary VFIO state, and default route stayed on `ens33`.
+  - This is recorded as VM lab evidence only; SuriTuner still correctly hard-blocks DPDK full in this VM due to missing IOMMU group.
 - `detect --iface ens37 --json` and `report --iface ens37 --json` parse with `jq empty`.
 - Non-root `apply --profile pcap --iface ens37 --config-only --yes` refuses before planning with `this command requires root privileges`.
 - Real safe PCAP config-only apply and rollback on `ens37`: `/var/lib/surituner/state/20260526T151125.997723793Z.json`, final status `rolled_back`, all rollback records `ok`; `suricata.service` remained `active` and `suricata -T -c /etc/suricata/suricata.yaml` passes after rollback.
