@@ -2,6 +2,7 @@ package surituner
 
 import (
 	"bytes"
+	"encoding/json"
 	"io"
 	"os"
 	"path/filepath"
@@ -230,6 +231,74 @@ func TestRunCLIApplyOSTuningDoesNotValidateYAMLOrRestart(t *testing.T) {
 	}
 	if !strings.Contains(strings.ToLower(errOut.String()), "pre-state") {
 		t.Fatalf("expected pre-state validation error, got stderr=%q", errOut.String())
+	}
+}
+
+func TestRunCLIApplyDPDKFullForcePreservesHardBlockBeforeState(t *testing.T) {
+	orig := getEUID
+	defer func() { getEUID = orig }()
+	getEUID = func() int { return 0 }
+
+	dir, configPath, logPath := setupFakeCLIHost(t)
+	stateDir := filepath.Join(dir, "state")
+	var out bytes.Buffer
+	var errOut bytes.Buffer
+	code := RunCLI([]string{
+		"apply",
+		"--profile", "dpdk",
+		"--iface", "lo",
+		"--config-path", configPath,
+		"--state-dir", stateDir,
+		"--full",
+		"--force",
+		"--yes",
+	}, strings.NewReader(""), &out, &errOut)
+	if code != 1 {
+		t.Fatalf("expected DPDK full apply to fail on hard blockers, code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+	if !strings.Contains(errOut.String(), "non-overridable blockers") {
+		t.Fatalf("expected hard-block error, got stderr=%q", errOut.String())
+	}
+	if _, statErr := os.Stat(stateDir); !os.IsNotExist(statErr) {
+		t.Fatalf("expected no state dir when hard-blocked before executor state write")
+	}
+	log := readCommandLog(t, logPath)
+	for _, forbidden := range []string{
+		"suricata -T -c",
+		"systemctl restart suricata.service",
+		"dpdk-devbind.py --bind",
+	} {
+		if strings.Contains(log, forbidden) {
+			t.Fatalf("did not expect live command %q when DPDK plan is hard-blocked, log:\n%s", forbidden, log)
+		}
+	}
+}
+
+func TestRunCLIPlanAFXDPFullHardBlocksWithoutInterfaceSignal(t *testing.T) {
+	_, configPath, _ := setupFakeCLIHost(t)
+	var out bytes.Buffer
+	var errOut bytes.Buffer
+	code := RunCLI([]string{
+		"plan",
+		"--profile", "af-xdp",
+		"--iface", "lo",
+		"--config-path", configPath,
+		"--scope", "full",
+		"--force",
+		"--json",
+	}, strings.NewReader(""), &out, &errOut)
+	if code != 0 {
+		t.Fatalf("expected AF_XDP full plan JSON, code=%d stderr=%q", code, errOut.String())
+	}
+	var plan Plan
+	if err := json.Unmarshal(out.Bytes(), &plan); err != nil {
+		t.Fatalf("parse plan JSON: %v\n%s", err, out.String())
+	}
+	if !plan.Blocked || !plan.HardBlocked {
+		t.Fatalf("expected AF_XDP full plan to hard-block without interface signal, blocked=%t hard=%t reasons=%v", plan.Blocked, plan.HardBlocked, plan.BlockingReasons)
+	}
+	if !strings.Contains(strings.Join(plan.BlockingReasons, "\n"), "interface XDP support signal") {
+		t.Fatalf("expected interface-signal blocker, got %v", plan.BlockingReasons)
 	}
 }
 

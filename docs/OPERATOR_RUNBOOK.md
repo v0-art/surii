@@ -185,3 +185,6 @@ For AF_XDP zero-copy acceptance:
 sudo ./scripts/production_acceptance.sh --profile af-xdp --iface <iface> --zero-copy-verified --apply-full --traffic-ready
 ```
 
+For the full step-by-step maintenance-window procedure, use [Target Acceptance Scenario](TARGET_ACCEPTANCE_SCENARIO.md).
+
+Before cutting or shipping a build, use [Pre-Release Checklist](PRE_RELEASE_CHECKLIST.md).

@@ -379,6 +379,8 @@ Additional readiness and operations docs:
 
 - [Production Readiness](docs/PRODUCTION_READINESS.md)
 - [Operator Runbook](docs/OPERATOR_RUNBOOK.md)
+- [Pre-Release Checklist](docs/PRE_RELEASE_CHECKLIST.md)
+- [Target Acceptance Scenario](docs/TARGET_ACCEPTANCE_SCENARIO.md)
 
 ### Project Layout
 
@@ -395,7 +397,11 @@ internal/surituner/reporter.go     human/JSON output and recommendations
 internal/surituner/runner.go       command runner and trusted executable lookup
 internal/surituner/validation.go   CLI input validation
 scripts/ci.sh                      local CI checks
+scripts/e2e_fake_cli.sh            non-root fake-host CLI/e2e scenario
+scripts/package_release.sh         release tarball and checksum builder
 scripts/production_acceptance.sh   target-host production readiness gate
+scripts/traffic_live_loopback_lab.sh root tcpdump loopback traffic capture lab
+scripts/traffic_pcap_lab.sh        non-root Suricata pcap traffic lab
 scripts/e2e_real_smoke.sh          real-host smoke test
 scripts/install_suricata.sh        Debian/Ubuntu Suricata setup helper
 scripts/check_dpdk_prereqs.sh      safe DPDK tooling/preflight helper, no bind/unbind
@@ -424,6 +430,32 @@ If `make` is available:
 ```bash
 make ci
 make race
+make ci-full
+make release-snapshot
+```
+
+The fake e2e scenario exercises JSON detect/plan/report paths and hard-block behavior without root or live system changes:
+
+```bash
+./scripts/e2e_fake_cli.sh
+```
+
+When Suricata is installed locally, this non-root traffic lab generates a TCP/HTTP pcap and verifies a Suricata alert:
+
+```bash
+./scripts/traffic_pcap_lab.sh
+```
+
+When tcpdump privileges are available, this lab sends real TCP traffic over loopback, captures it, and verifies Suricata alerting on the captured pcap:
+
+```bash
+./scripts/traffic_live_loopback_lab.sh
+```
+
+Release artifacts are built under `dist/`:
+
+```bash
+./scripts/package_release.sh --version snapshot
 ```
 
 `golangci-lint` is optional. Run it only when installed:
@@ -579,3 +611,5 @@ sudo ./scripts/e2e_real_smoke.sh --iface <capture_iface> --run-full
 ```
 
 Run DPDK and AF_XDP full-mode tests only on hosts where interface disruption, driver rebinding, HugePages changes, and service restarts are acceptable.
+
+For the final target procedure, use [Target Acceptance Scenario](docs/TARGET_ACCEPTANCE_SCENARIO.md).

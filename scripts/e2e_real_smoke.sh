@@ -148,8 +148,7 @@ echo "[e2e] validating base Suricata config"
 suricata -T -c "${BASE_CONFIG}"
 
 TS="$(date -u +%Y%m%dT%H%M%SZ)"
-ARTIFACT_DIR="/tmp/surituner-e2e-${TS}"
-mkdir -p "${ARTIFACT_DIR}"
+ARTIFACT_DIR="$(mktemp -d "/tmp/surituner-e2e-${TS}.XXXXXX")"
 
 CFG_ARGS=()
 if [[ -n "${CONFIG_PATH}" ]]; then

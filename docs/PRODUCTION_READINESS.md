@@ -33,6 +33,8 @@ This document separates what is complete in this repository from what still requ
 - PCAP config-only/full plans and real config-only apply+rollback on `ens37` passed.
 - AF_PACKET full on management interface `ens33` is blocked by guardrails.
 - DPDK full on `ens37` remains hard-blocked by missing IOMMU group.
+- Non-root offline traffic lab with generated TCP/HTTP pcap and Suricata alert can be run with `./scripts/traffic_pcap_lab.sh`.
+- Live loopback traffic capture with tcpdump privileges can be run with `./scripts/traffic_live_loopback_lab.sh`.
 - Unsafe DPDK no-IOMMU lab on non-management `ens37`:
   - `ens37` was temporarily bound to `vfio-pci`;
   - `dpdk-testpmd --iova-mode=pa` opened Port 0 using `net_e1000_em`;
@@ -118,13 +120,10 @@ Pass criteria:
 Before calling a build production-ready for a target environment:
 
 ```bash
-/home/vol/.local/go/bin/go test ./...
-CGO_ENABLED=1 CC="/home/vol/.local/zig/current/zig cc" CXX="/home/vol/.local/zig/current/zig c++" /home/vol/.local/go/bin/go test -race ./...
-/home/vol/.local/go/bin/go vet ./...
-/home/vol/.local/go/bin/gofmt -l .
-/home/vol/.local/go/bin/go build -o surituner ./cmd/surituner
-/home/vol/.local/go/bin/go mod verify
-bash -n scripts/*.sh
+make ci-full
+./scripts/e2e_fake_cli.sh
+./scripts/traffic_pcap_lab.sh
+./scripts/package_release.sh --version snapshot
 ```
 
 Optional when installed:
@@ -133,9 +132,13 @@ Optional when installed:
 golangci-lint run ./...
 ```
 
+Use [Pre-Release Checklist](PRE_RELEASE_CHECKLIST.md) for the full local, GitHub, and target-host gate.
+
 For the final target-host gate, use:
 
 ```bash
 sudo ./scripts/production_acceptance.sh --profile <profile> --iface <capture_iface>
 sudo ./scripts/production_acceptance.sh --profile <profile> --iface <capture_iface> --apply-full --traffic-ready
 ```
+
+Use [Target Acceptance Scenario](TARGET_ACCEPTANCE_SCENARIO.md) for the full maintenance-window procedure.

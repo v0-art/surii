@@ -42,3 +42,8 @@ jobs:
       - name: Shell Syntax
         run: bash -n scripts/*.sh
 
+      - name: Fake CLI E2E
+        run: |
+          bin="$(mktemp)"
+          go build -o "${bin}" ./cmd/surituner
+          SURITUNER_BIN="${bin}" ./scripts/e2e_fake_cli.sh

@@ -172,9 +172,10 @@ fi
 
 TS="$(date -u +%Y%m%dT%H%M%SZ)"
 if [[ -z "${ARTIFACT_DIR}" ]]; then
-  ARTIFACT_DIR="/tmp/surituner-production-acceptance-${TS}"
+  ARTIFACT_DIR="$(mktemp -d "/tmp/surituner-production-acceptance-${TS}.XXXXXX")"
+else
+  mkdir -p "${ARTIFACT_DIR}"
 fi
-mkdir -p "${ARTIFACT_DIR}"
 
 CFG_ARGS=()
 if [[ -n "${CONFIG_PATH}" ]]; then
@@ -313,4 +314,3 @@ fi
 
 echo "[acceptance] PASS"
 echo "Artifacts: ${ARTIFACT_DIR}"
-
