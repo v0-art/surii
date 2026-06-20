@@ -1,5 +1,7 @@
 # SuriTuner
 
+[Русская версия](README_RU.md)
+
 SuriTuner is a local Safe Decision Engine for hardware-aware Suricata 7.x/8.x tuning.
 
 It inspects the host, builds a dry-run plan, applies only validated changes, stores rollback state, and can restore Suricata/OS/NIC settings best-effort from that state.
