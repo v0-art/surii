@@ -106,6 +106,7 @@ for target in "${TARGETS[@]}"; do
   GOOS="${os}" GOARCH="${arch}" CGO_ENABLED=0 "${GO_BIN}" build -trimpath -o "${package_dir}/surituner" ./cmd/surituner
 
   cp README.md "${package_dir}/"
+  cp README_RU.md "${package_dir}/"
   cp docs/*.md "${package_dir}/docs/"
   cp scripts/check_dpdk_prereqs.sh "${package_dir}/scripts/"
   cp scripts/e2e_fake_cli.sh "${package_dir}/scripts/"

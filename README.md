@@ -6,6 +6,18 @@ SuriTuner is a local Safe Decision Engine for hardware-aware Suricata 7.x/8.x tu
 
 It inspects the host, builds a dry-run plan, applies only validated changes, stores rollback state, and can restore Suricata/OS/NIC settings best-effort from that state.
 
+## Project Capabilities
+
+- Hardware and service inventory for Suricata hosts: build capabilities, CPU/NUMA, NIC driver/PCI/RSS/offloads, ruleset state, runtime counters, default route, and SSH management-risk signals.
+- Dry-run plans for AF_PACKET, DPDK, AF_XDP, NFQ, and PCAP capture profiles.
+- Safe apply scopes: config-only YAML tuning, OS/NIC tuning, or full profile apply.
+- Transactional apply with pre-state capture, state file persistence before live changes, `suricata -T` validation, service restart checks, and auto-rollback on failure.
+- Typed rollback for YAML, ethtool, sysctl, IRQ affinity, promiscuous mode, HugePages, NFQ rules, DPDK bind state, and SuriTuner systemd drop-ins.
+- Management-interface guardrails that block disruptive actions on default-route or SSH interfaces unless `--force` is explicit.
+- Non-overridable hard blockers for unsafe or unsupported profile paths, including DPDK without IOMMU and AF_XDP full mode without interface-specific XDP signal.
+- Human-readable and JSON output for automation.
+- Local fake-host e2e, offline pcap traffic lab, live loopback traffic lab, real-host smoke, production acceptance, and release packaging scripts.
+
 ## Status
 
 Current implementation status against the approved v1 requirements: production-candidate at code/test level.
@@ -47,6 +59,32 @@ What still must be verified on an IOMMU-capable dedicated capture NIC:
 - DPDK full bind/unbind with `/sys/class/net/<iface>/device/iommu_group` present and `dpdk-devbind.py --status` showing `unused=vfio-pci`.
 - Hardware-specific AF_XDP zero-copy support, RSS symmetry, and NUMA hugepage restore on production-like hardware.
 
+## System Requirements
+
+Minimum runtime:
+
+- Linux host with systemd-managed Suricata service.
+- Suricata 7.x or 8.x installed and a valid `suricata.yaml`.
+- Root privileges for `apply`, `rollback`, real smoke tests, production acceptance, and live tcpdump traffic lab.
+- Required host tools for normal operation: `suricata`, `systemctl`, `ip`, `ethtool`, `sysctl`, `ss`, `bash`, and common GNU/coreutils.
+- `jq` for the provided shell scripts and JSON acceptance checks.
+- Writable state directory under `/var/lib/surituner/state`; SuriTuner creates it with restrictive permissions when needed.
+
+Build and test requirements:
+
+- Go 1.23+.
+- `make` for the documented convenience targets.
+- A C toolchain or Zig for `go test -race`; this workspace uses `/home/vol/.local/zig/current/zig`.
+- Optional: `actionlint`, `golangci-lint`, `govulncheck`.
+
+Profile-specific requirements:
+
+- AF_PACKET: Linux AF_PACKET support and a capture interface with rollback pre-state for full OS/NIC tuning.
+- PCAP: Suricata PCAP/live capture support.
+- NFQ: Suricata NFQ build support plus `nftables` or `iptables` backend.
+- DPDK: Suricata DPDK build support, PCI-backed capture NIC, `dpdk-devbind.py`, `vfio-pci`, rollback driver knowledge, and a real IOMMU group.
+- AF_XDP: Suricata AF_XDP build support, kernel AF_XDP support, interface-specific XDP signal, and hardware/tooling proof for zero-copy production acceptance.
+
 ## Build
 
 The repository uses Go. In this workspace the normal `go` binary is not in `PATH`; the Makefile points at the local toolchain:
@@ -61,6 +99,73 @@ If Go is already in `PATH`, this also works:
 ```bash
 go build -o surituner ./cmd/surituner
 ```
+
+## Deploy On Linux
+
+SuriTuner is a CLI tool. It does not need its own daemon; it operates against the installed Suricata service and writes rollback state under `/var/lib/surituner/state`.
+
+### From Source
+
+```bash
+git clone <repo-url> surituner
+cd surituner
+/home/vol/.local/go/bin/go build -o surituner ./cmd/surituner
+sudo install -m 0755 surituner /usr/local/sbin/surituner
+```
+
+If Go is in `PATH`:
+
+```bash
+go build -o surituner ./cmd/surituner
+sudo install -m 0755 surituner /usr/local/sbin/surituner
+```
+
+Verify the install:
+
+```bash
+/usr/local/sbin/surituner --help
+sudo /usr/local/sbin/surituner detect --iface <capture_iface> --json | jq empty
+sudo /usr/local/sbin/surituner plan --profile af-packet --iface <capture_iface> --scope config-only --json | jq empty
+```
+
+### From A Release Tarball
+
+```bash
+tar -xzf surituner_<version>_linux_amd64.tar.gz
+cd surituner_<version>_linux_amd64
+sudo install -m 0755 surituner /usr/local/sbin/surituner
+sudo install -d /opt/surituner
+sudo cp -a docs scripts README.md /opt/surituner/
+```
+
+Run the safe checks first:
+
+```bash
+sudo /usr/local/sbin/surituner detect --iface <capture_iface> --json | jq '.snapshot.safety,.snapshot.nic'
+sudo /usr/local/sbin/surituner plan --profile af-packet --iface <capture_iface> --scope config-only --json | jq .
+```
+
+Then run the lowest-risk apply/rollback path:
+
+```bash
+sudo /usr/local/sbin/surituner apply --profile af-packet --iface <capture_iface> --config-only --yes
+sudo /usr/local/sbin/surituner rollback --state latest --yes
+```
+
+For production acceptance on the target host, run from the unpacked release directory or repository checkout:
+
+```bash
+sudo ./scripts/production_acceptance.sh --profile <profile> --iface <capture_iface>
+sudo ./scripts/production_acceptance.sh --profile <profile> --iface <capture_iface> --apply-full --traffic-ready
+```
+
+For AF_XDP zero-copy acceptance:
+
+```bash
+sudo ./scripts/production_acceptance.sh --profile af-xdp --iface <capture_iface> --zero-copy-verified --apply-full --traffic-ready
+```
+
+Keep the generated `/tmp/surituner-production-acceptance-*` artifact directory with the release evidence.
 
 ## User Guide
 

@@ -6,6 +6,18 @@ SuriTuner - локальный Safe Decision Engine для аппаратно-з
 
 Он инспектирует хост, строит dry-run план, применяет только проверенные изменения, сохраняет состояние для rollback и умеет best-effort восстанавливать настройки Suricata, ОС и сетевой карты из этого состояния.
 
+## Возможности проекта
+
+- Инвентаризация Suricata-хоста: build capabilities, CPU/NUMA, NIC driver/PCI/RSS/offloads, состояние ruleset, runtime counters, default route и SSH management-risk signals.
+- Dry-run планы для capture-профилей AF_PACKET, DPDK, AF_XDP, NFQ и PCAP.
+- Безопасные apply scopes: config-only YAML tuning, OS/NIC tuning или full profile apply.
+- Транзакционный apply с capture pre-state, сохранением state file до live-изменений, `suricata -T` validation, service restart checks и auto-rollback при failure.
+- Typed rollback для YAML, ethtool, sysctl, IRQ affinity, promiscuous mode, HugePages, NFQ rules, DPDK bind state и SuriTuner systemd drop-ins.
+- Management-interface guardrails, которые блокируют disruptive actions на default-route или SSH interfaces, если явно не указан `--force`.
+- Non-overridable hard blockers для unsafe или unsupported profile paths, включая DPDK без IOMMU и AF_XDP full mode без interface-specific XDP signal.
+- Human-readable и JSON output для automation.
+- Набор проверочных scripts: fake-host e2e, offline pcap traffic lab, live loopback traffic lab, real-host smoke, production acceptance и release packaging.
+
 ## Статус
 
 Текущее состояние реализации относительно утвержденных требований v1: production-candidate на уровне кода и тестов.
@@ -53,6 +65,32 @@ SuriTuner - локальный Safe Decision Engine для аппаратно-з
 - Hardware-specific AF_XDP zero-copy support, RSS symmetry и NUMA hugepage restore на production-like железе.
 - Runtime drop counters под реальным mirror/tap/generator traffic на целевом интерфейсе.
 
+## Системные требования
+
+Минимальные требования для запуска:
+
+- Linux-хост с Suricata service под управлением systemd.
+- Suricata 7.x или 8.x и валидный `suricata.yaml`.
+- Root-права для `apply`, `rollback`, real smoke tests, production acceptance и live tcpdump traffic lab.
+- Host tools для обычной работы: `suricata`, `systemctl`, `ip`, `ethtool`, `sysctl`, `ss`, `bash` и обычные GNU/coreutils.
+- `jq` для shell scripts и JSON acceptance checks.
+- Writable state directory под `/var/lib/surituner/state`; SuriTuner создает его с restrictive permissions при необходимости.
+
+Требования для сборки и тестов:
+
+- Go 1.23+.
+- `make` для documented convenience targets.
+- C toolchain или Zig для `go test -race`; в этом workspace используется `/home/vol/.local/zig/current/zig`.
+- Optional: `actionlint`, `golangci-lint`, `govulncheck`.
+
+Profile-specific requirements:
+
+- AF_PACKET: Linux AF_PACKET support и capture interface с rollback pre-state для full OS/NIC tuning.
+- PCAP: Suricata PCAP/live capture support.
+- NFQ: Suricata NFQ build support плюс `nftables` или `iptables` backend.
+- DPDK: Suricata DPDK build support, PCI-backed capture NIC, `dpdk-devbind.py`, `vfio-pci`, rollback driver knowledge и реальная IOMMU group.
+- AF_XDP: Suricata AF_XDP build support, kernel AF_XDP support, interface-specific XDP signal и hardware/tooling proof для zero-copy production acceptance.
+
 ## Какое железо нужно для финального закрытия
 
 Минимально нужен отдельный тестовый или staging-сервер, где допустимы driver rebinding, изменение NIC state, HugePages и restart Suricata.
@@ -95,6 +133,73 @@ SuriTuner - локальный Safe Decision Engine для аппаратно-з
 ```bash
 go build -o surituner ./cmd/surituner
 ```
+
+## Развертывание на Linux
+
+SuriTuner - CLI tool. Ему не нужен собственный daemon; он работает с установленным Suricata service и пишет rollback state в `/var/lib/surituner/state`.
+
+### Из исходников
+
+```bash
+git clone <repo-url> surituner
+cd surituner
+/home/vol/.local/go/bin/go build -o surituner ./cmd/surituner
+sudo install -m 0755 surituner /usr/local/sbin/surituner
+```
+
+Если Go есть в `PATH`:
+
+```bash
+go build -o surituner ./cmd/surituner
+sudo install -m 0755 surituner /usr/local/sbin/surituner
+```
+
+Проверьте установку:
+
+```bash
+/usr/local/sbin/surituner --help
+sudo /usr/local/sbin/surituner detect --iface <capture_iface> --json | jq empty
+sudo /usr/local/sbin/surituner plan --profile af-packet --iface <capture_iface> --scope config-only --json | jq empty
+```
+
+### Из release tarball
+
+```bash
+tar -xzf surituner_<version>_linux_amd64.tar.gz
+cd surituner_<version>_linux_amd64
+sudo install -m 0755 surituner /usr/local/sbin/surituner
+sudo install -d /opt/surituner
+sudo cp -a docs scripts README.md /opt/surituner/
+```
+
+Сначала запустите safe checks:
+
+```bash
+sudo /usr/local/sbin/surituner detect --iface <capture_iface> --json | jq '.snapshot.safety,.snapshot.nic'
+sudo /usr/local/sbin/surituner plan --profile af-packet --iface <capture_iface> --scope config-only --json | jq .
+```
+
+Затем проверьте самый низкорисковый apply/rollback path:
+
+```bash
+sudo /usr/local/sbin/surituner apply --profile af-packet --iface <capture_iface> --config-only --yes
+sudo /usr/local/sbin/surituner rollback --state latest --yes
+```
+
+Для production acceptance на целевом хосте запускайте из unpacked release directory или repository checkout:
+
+```bash
+sudo ./scripts/production_acceptance.sh --profile <profile> --iface <capture_iface>
+sudo ./scripts/production_acceptance.sh --profile <profile> --iface <capture_iface> --apply-full --traffic-ready
+```
+
+Для AF_XDP zero-copy acceptance:
+
+```bash
+sudo ./scripts/production_acceptance.sh --profile af-xdp --iface <capture_iface> --zero-copy-verified --apply-full --traffic-ready
+```
+
+Сохраните generated `/tmp/surituner-production-acceptance-*` artifact directory вместе с release evidence.
 
 ## User Guide
 
